@@ -38,7 +38,8 @@ export default async function handler(req, res) {
     }
 
     const data = await response.json();
-    return res.status(200).json({ access_token: data.access_token });
+    // Return account_id alongside the token so the client never needs to call /users/me
+    return res.status(200).json({ access_token: data.access_token, account_id: accountId });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
