@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo } from 'react';
 import Head from 'next/head';
 import {
-  getToken, chunkDateRange,
+  getToken, getHostUserId, chunkDateRange,
   fetchMeetingsInRange, fetchParticipants,
   aggregate, exportCSV, sleep, DELAY_MS
 } from '../lib/zoom';
@@ -124,7 +124,10 @@ export default function Home() {
 
     try {
       setStatusMsg('Authenticating with Zoom…');
-      const { token, userId } = await getToken();
+      const { token } = await getToken();
+
+      setStatusMsg('Fetching your user profile…');
+      const userId = await getHostUserId(token);
 
       const chunks = chunkDateRange(fromDate, toDate);
       setStatusMsg(`Scanning ${chunks.length} month window(s)…`);
