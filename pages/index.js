@@ -3,7 +3,7 @@ import Head from 'next/head';
 import {
   getToken, getAllUserIds, chunkDateRange,
   fetchMeetingsInRange, fetchParticipants,
-  aggregate, exportCSV, sleep, DELAY_MS
+  aggregate, exportCSV, parseHistoricalCSVs, sleep, DELAY_MS
 } from '../lib/zoom';
 
 // ─── SMALL COMPONENTS ─────────────────────────────────────────────────────────
@@ -100,6 +100,7 @@ export default function Home() {
   const [toDate, setToDate] = useState(today);
   const [topicFilter, setTopicFilter] = useState('');
 
+  const [csvFiles, setCsvFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [progress, setProgress] = useState(0);
@@ -178,15 +179,29 @@ export default function Home() {
       }
 
       const vol = aggregate(enriched);
-      setSessions(enriched.sort((a, b) => b.date.localeCompare(a.date)));
-      setVolunteers(vol.sort((a, b) => b.attendanceRate - a.attendanceRate));
+
+      // Merge historical CSV sessions if any were uploaded
+      let allSessions = enriched;
+      if (csvFiles.length > 0) {
+        setStatusMsg('Parsing historical CSV files…');
+        const historicalSessions = await parseHistoricalCSVs(csvFiles);
+        // Deduplicate: if a session date+topic already exists from API, prefer API version
+        const apiKeys = new Set(enriched.map(s => `${s.date}__${s.topic}`));
+        const newHistorical = historicalSessions.filter(s => !apiKeys.has(`${s.date}__${s.topic}`));
+        allSessions = [...enriched, ...newHistorical].sort((a, b) => b.date.localeCompare(a.date));
+        setStatusMsg('');
+      }
+
+      const volFinal = aggregate(allSessions);
+      setSessions(allSessions);
+      setVolunteers(volFinal.sort((a, b) => b.attendanceRate - a.attendanceRate));
       setStatusMsg('');
     } catch (e) {
       setError(e.message || 'Something went wrong.');
     } finally {
       setLoading(false);
     }
-  }, [fromDate, toDate, topicFilter]);
+  }, [fromDate, toDate, topicFilter, csvFiles]);
 
   const filteredVolunteers = useMemo(() => {
     if (!volunteers) return [];
@@ -320,7 +335,49 @@ export default function Home() {
               </button>
             </div>
 
-            {/* Progress */}
+            {/* Historical CSV Upload */}
+            <div style={{ marginTop: 20, paddingTop: 20, borderTop: '1px solid #1a2e3a' }}>
+              <div style={{ fontSize: 11, color: '#556677', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 10 }}>
+                Historical Data <span style={{ color: '#2a3d4d' }}>(optional — upload Zoom participant CSVs for dates before API range)</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <label style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 8,
+                  background: '#0a1520', border: '1px dashed #1e3040',
+                  borderRadius: 8, padding: '9px 16px', cursor: 'pointer',
+                  fontSize: 12, color: '#8fa3b1', transition: 'border-color 0.15s',
+                }}
+                  onMouseEnter={e => e.currentTarget.style.borderColor = '#00c2a8'}
+                  onMouseLeave={e => e.currentTarget.style.borderColor = '#1e3040'}
+                >
+                  <span style={{ fontSize: 16 }}>📂</span>
+                  {csvFiles.length === 0 ? 'Upload participant CSVs…' : `${csvFiles.length} file${csvFiles.length !== 1 ? 's' : ''} selected`}
+                  <input
+                    type="file"
+                    accept=".csv"
+                    multiple
+                    style={{ display: 'none' }}
+                    onChange={e => setCsvFiles(Array.from(e.target.files))}
+                  />
+                </label>
+                {csvFiles.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 11, color: '#556677' }}>
+                      {csvFiles.map(f => f.name).join(', ').slice(0, 80)}{csvFiles.map(f => f.name).join(', ').length > 80 ? '…' : ''}
+                    </div>
+                    <button
+                      onClick={() => setCsvFiles([])}
+                      style={{ background: 'none', border: 'none', color: '#e05252', cursor: 'pointer', fontSize: 12 }}
+                    >✕ Clear</button>
+                  </>
+                )}
+              </div>
+              {csvFiles.length > 0 && (
+                <div style={{ marginTop: 8, fontSize: 11, color: '#2a4d3a' }}>
+                  ✓ These will be merged with live API data when you click Pull Data. Sessions already in the API range won't be duplicated.
+                </div>
+              )}
+            </div>
             {loading && (
               <div style={{ marginTop: 18 }}>
                 <div style={{ fontSize: 12, color: '#556677', marginBottom: 7 }}>{statusMsg}</div>
