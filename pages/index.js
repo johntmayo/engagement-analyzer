@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo } from 'react';
 import Head from 'next/head';
 import {
-  getToken, getHostUserId, chunkDateRange,
+  getToken, getAllUserIds, chunkDateRange,
   fetchMeetingsInRange, fetchParticipants,
   aggregate, exportCSV, sleep, DELAY_MS
 } from '../lib/zoom';
@@ -126,16 +126,25 @@ export default function Home() {
       setStatusMsg('Authenticating with Zoom…');
       const { token } = await getToken();
 
-      setStatusMsg('Fetching your user profile…');
-      const userId = await getHostUserId(token);
+      setStatusMsg('Fetching user accounts…');
+      const userIds = await getAllUserIds(token);
 
       const chunks = chunkDateRange(fromDate, toDate);
-      setStatusMsg(`Scanning ${chunks.length} month window(s)…`);
+      setStatusMsg(`Scanning ${chunks.length} month window(s) across ${userIds.length} user(s)…`);
 
+      const seenUuids = new Set();
       let allMeetings = [];
-      for (const chunk of chunks) {
-        const meetings = await fetchMeetingsInRange(token, userId, chunk.from, chunk.to, setStatusMsg);
-        allMeetings.push(...meetings);
+      for (const userId of userIds) {
+        for (const chunk of chunks) {
+          const meetings = await fetchMeetingsInRange(token, userId, chunk.from, chunk.to, setStatusMsg);
+          for (const m of meetings) {
+            const key = m.uuid || m.id;
+            if (!seenUuids.has(key)) {
+              seenUuids.add(key);
+              allMeetings.push(m);
+            }
+          }
+        }
       }
 
       if (topicFilter.trim()) {
