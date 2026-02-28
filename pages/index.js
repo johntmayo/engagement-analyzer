@@ -1,9 +1,10 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import Head from 'next/head';
 import {
   getToken, getAllUserIds, chunkDateRange,
   fetchMeetingsInRange, fetchParticipants,
-  aggregate, exportCSV, parseHistoricalCSVs, sleep, DELAY_MS
+  aggregate, exportCSV, parseHistoricalCSVs, sleep, DELAY_MS,
+  saveLibrary, loadLibrary, clearLibrary, mergeSessions,
 } from '../lib/zoom';
 
 // ─── SMALL COMPONENTS ─────────────────────────────────────────────────────────
@@ -11,11 +12,8 @@ import {
 function StatCard({ label, value, sub, accent = '#00c2a8' }) {
   return (
     <div style={{
-      background: '#111c24',
-      border: '1px solid #1e2f3d',
-      borderRadius: 12,
-      padding: '20px 24px',
-      borderTop: `3px solid ${accent}`,
+      background: '#111c24', border: '1px solid #1e2f3d',
+      borderRadius: 12, padding: '20px 24px', borderTop: `3px solid ${accent}`,
     }}>
       <div style={{ fontSize: 28, fontWeight: 700, color: '#e8f4f0', fontFamily: "'DM Mono', monospace" }}>
         {value}
@@ -48,21 +46,26 @@ function Badge({ tier }) {
 
 function SessionRow({ session, index }) {
   const [open, setOpen] = useState(false);
+  const srcBadge = session.source === 'csv'
+    ? <span style={{ fontSize: 9, color: '#2a4d3a', border: '1px solid #1a3d2a', borderRadius: 3, padding: '1px 5px', marginLeft: 6 }}>CSV</span>
+    : null;
   return (
-    <div style={{ borderBottom: '1px solid #1a2630', animation: `fadeIn 0.3s ease ${index * 0.025}s both` }}>
+    <div style={{ borderBottom: '1px solid #1a2630', animation: `fadeIn 0.3s ease ${index * 0.02}s both` }}>
       <div
         onClick={() => setOpen(!open)}
-        style={{
-          display: 'flex', alignItems: 'center', padding: '12px 20px',
-          cursor: 'pointer', gap: 14, transition: 'background 0.15s',
-        }}
+        style={{ display: 'flex', alignItems: 'center', padding: '12px 20px', cursor: 'pointer', gap: 14, transition: 'background 0.15s' }}
         onMouseEnter={e => e.currentTarget.style.background = '#111c24'}
         onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
       >
         <div style={{ width: 96, fontSize: 12, color: '#556677', fontFamily: "'DM Mono', monospace", flexShrink: 0 }}>
           {session.date}
         </div>
-        <div style={{ flex: 1, fontSize: 14, color: '#c8dce8' }}>{session.topic}</div>
+        <div style={{ flex: 1, fontSize: 14, color: '#c8dce8' }}>
+          {session.topic}{srcBadge}
+        </div>
+        <div style={{ fontSize: 12, color: '#556677', fontFamily: "'DM Mono', monospace", flexShrink: 0 }}>
+          {session.duration}m
+        </div>
         <div style={{ fontSize: 13, color: '#00c2a8', fontFamily: "'DM Mono', monospace", flexShrink: 0 }}>
           {session.participants.length} attended
         </div>
@@ -89,6 +92,248 @@ function SessionRow({ session, index }) {
   );
 }
 
+// ─── TRENDS COMPONENTS ────────────────────────────────────────────────────────
+
+function BarChart({ data, valueKey, color, height = 120, labelEvery }) {
+  if (!data.length) return null;
+  const max = Math.max(...data.map(d => d[valueKey]), 1);
+  const W = 800, H = height;
+  const slotW = (W - 20) / data.length;
+  const barW = Math.max(4, slotW - 3);
+  const every = labelEvery ?? Math.max(1, Math.ceil(data.length / 12));
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H + 28}`} style={{ width: '100%', display: 'block' }}>
+      {data.map((d, i) => {
+        const barH = Math.max(1, Math.round((d[valueKey] / max) * H));
+        const x = 10 + i * slotW;
+        const y = H - barH;
+        return (
+          <g key={i}>
+            <rect x={x} y={y} width={barW} height={barH} fill={color} rx={2} opacity={0.8}>
+              <title>{d.month}: {d[valueKey]}</title>
+            </rect>
+            {i % every === 0 && (
+              <text x={x + barW / 2} y={H + 18} textAnchor="middle" fill="#446677" fontSize={9}>
+                {d.month}
+              </text>
+            )}
+          </g>
+        );
+      })}
+      {/* Y-axis max label */}
+      <text x={4} y={12} fill="#2a4060" fontSize={9}>{max}</text>
+    </svg>
+  );
+}
+
+function TrendsTab({ sessions, volunteers }) {
+  const today = new Date().toISOString().slice(0, 10);
+
+  const monthly = useMemo(() => {
+    const m = {};
+    for (const s of sessions) {
+      const key = s.date.slice(0, 7);
+      if (!m[key]) m[key] = [];
+      m[key].push(s);
+    }
+    return Object.entries(m)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([month, ss]) => ({
+        month,
+        sessions: ss.length,
+        avgAttendees: Math.round(ss.reduce((sum, s) => sum + s.participants.length, 0) / ss.length),
+        uniqueAttendees: new Set(ss.flatMap(s => s.participants.map(p => p.email || `__${p.name}`))).size,
+      }));
+  }, [sessions]);
+
+  const insights = useMemo(() => {
+    if (!volunteers.length) return null;
+    const days = (dateStr) => Math.floor((new Date(today) - new Date(dateStr)) / 86400000);
+
+    const absent60 = volunteers.filter(v => v.tier !== 'low' && days(v.lastSeen) > 60)
+      .sort((a, b) => days(b.lastSeen) - days(a.lastSeen));
+
+    const newFaces = volunteers.filter(v => days(v.firstSeen) <= 60)
+      .sort((a, b) => b.firstSeen.localeCompare(a.firstSeen));
+
+    const stars = volunteers.filter(v => v.tier === 'high')
+      .sort((a, b) => b.sessionsAttended - a.sessionsAttended)
+      .slice(0, 8);
+
+    // Trend: last 2 full months
+    const last2 = monthly.slice(-2);
+    const trendDir = last2.length < 2 ? null
+      : last2[1].avgAttendees > last2[0].avgAttendees ? 'up'
+      : last2[1].avgAttendees < last2[0].avgAttendees ? 'down'
+      : 'flat';
+    const trendDelta = last2.length === 2
+      ? last2[1].avgAttendees - last2[0].avgAttendees
+      : 0;
+
+    return { absent60, newFaces, stars, trendDir, trendDelta, last2 };
+  }, [volunteers, monthly, today]);
+
+  const card = (title, children) => (
+    <div style={{
+      background: '#0d1e2b', border: '1px solid #1a2e3a',
+      borderRadius: 12, padding: '20px 24px', marginBottom: 16,
+    }}>
+      <div style={{ fontSize: 11, color: '#556677', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 14 }}>
+        {title}
+      </div>
+      {children}
+    </div>
+  );
+
+  return (
+    <div style={{ paddingTop: 24 }}>
+
+      {/* Trend summary line */}
+      {insights?.trendDir && (
+        <div style={{
+          background: '#0d1e2b', border: '1px solid #1a2e3a', borderRadius: 12,
+          padding: '16px 24px', marginBottom: 16, display: 'flex', gap: 32, alignItems: 'center',
+        }}>
+          <div>
+            <div style={{ fontSize: 11, color: '#556677', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+              Avg Attendance Trend
+            </div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+              <span style={{
+                fontSize: 26, fontWeight: 700, fontFamily: "'DM Mono', monospace",
+                color: insights.trendDir === 'up' ? '#00c2a8' : insights.trendDir === 'down' ? '#e05252' : '#f0b429',
+              }}>
+                {insights.trendDir === 'up' ? '↑' : insights.trendDir === 'down' ? '↓' : '→'} {Math.abs(insights.trendDelta)}
+              </span>
+              <span style={{ fontSize: 13, color: '#556677' }}>
+                {insights.trendDir === 'up' ? 'more' : insights.trendDir === 'down' ? 'fewer' : 'same'} avg attendees vs prior month
+                {insights.last2.length === 2 && ` (${insights.last2[0].month} → ${insights.last2[1].month})`}
+              </span>
+            </div>
+          </div>
+          <div style={{ fontSize: 13, color: '#2a3d4d' }}>
+            Based on last 2 complete months
+          </div>
+        </div>
+      )}
+
+      {/* Sessions per month chart */}
+      {card('Sessions per Month', (
+        <>
+          <BarChart data={monthly} valueKey="sessions" color="#0077b6" height={110} />
+          <div style={{ fontSize: 11, color: '#2a3d4d', marginTop: 6 }}>
+            {monthly.length} months of data · {sessions.length} total sessions
+          </div>
+        </>
+      ))}
+
+      {/* Avg attendees per month */}
+      {card('Avg Attendees per Session', (
+        <>
+          <BarChart data={monthly} valueKey="avgAttendees" color="#00c2a8" height={110} />
+          <div style={{ fontSize: 11, color: '#2a3d4d', marginTop: 6 }}>
+            Unique attendees per session, averaged by month
+          </div>
+        </>
+      ))}
+
+      {/* Unique participants per month */}
+      {card('Unique Participants per Month', (
+        <>
+          <BarChart data={monthly} valueKey="uniqueAttendees" color="#7c5cbf" height={110} />
+          <div style={{ fontSize: 11, color: '#2a3d4d', marginTop: 6 }}>
+            Distinct people who appeared at least once that month
+          </div>
+        </>
+      ))}
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+
+        {/* Stars */}
+        {card('Most Consistent Volunteers', (
+          <>
+            {insights?.stars.map((v, i) => (
+              <div key={v.email || v.name} style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '7px 0', borderBottom: '1px solid #0d1822',
+              }}>
+                <div>
+                  <div style={{ fontSize: 13, color: '#c8dce8' }}>{v.name}</div>
+                  <div style={{ fontSize: 11, color: '#2a3d4d' }}>{v.email || 'no email'}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 13, color: '#00c2a8', fontFamily: "'DM Mono', monospace", fontWeight: 600 }}>
+                    {(v.attendanceRate * 100).toFixed(0)}%
+                  </div>
+                  <div style={{ fontSize: 11, color: '#556677' }}>{v.sessionsAttended} sessions</div>
+                </div>
+              </div>
+            ))}
+            {!insights?.stars.length && <div style={{ color: '#2a3d4d', fontSize: 13 }}>No highly engaged volunteers yet.</div>}
+          </>
+        ))}
+
+        {/* Recently absent */}
+        {card('Slipping Away (Active → 60+ days absent)', (
+          <>
+            {insights?.absent60.length === 0 && (
+              <div style={{ color: '#00c2a8', fontSize: 13 }}>No formerly-active volunteers missing — great sign.</div>
+            )}
+            {insights?.absent60.map((v) => {
+              const daysGone = Math.floor((new Date(today) - new Date(v.lastSeen)) / 86400000);
+              return (
+                <div key={v.email || v.name} style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  padding: '7px 0', borderBottom: '1px solid #0d1822',
+                }}>
+                  <div>
+                    <div style={{ fontSize: 13, color: '#c8dce8' }}>{v.name}</div>
+                    <div style={{ fontSize: 11, color: '#2a3d4d' }}>{v.email || 'no email'}</div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: 12, color: '#e05252', fontFamily: "'DM Mono', monospace" }}>
+                      {daysGone}d ago
+                    </div>
+                    <div style={{ fontSize: 11, color: '#556677' }}>was {v.tier === 'mid' ? 'Sporadic' : 'Active'}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </>
+        ))}
+
+        {/* New faces */}
+        {card('New Faces (last 60 days)', (
+          <>
+            {insights?.newFaces.length === 0 && (
+              <div style={{ color: '#2a3d4d', fontSize: 13 }}>No new volunteers in the last 60 days.</div>
+            )}
+            {insights?.newFaces.map((v) => (
+              <div key={v.email || v.name} style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '7px 0', borderBottom: '1px solid #0d1822',
+              }}>
+                <div>
+                  <div style={{ fontSize: 13, color: '#c8dce8' }}>{v.name}</div>
+                  <div style={{ fontSize: 11, color: '#2a3d4d' }}>{v.email || 'no email'}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 12, color: '#f0b429', fontFamily: "'DM Mono', monospace" }}>
+                    first: {v.firstSeen}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#556677' }}>{v.sessionsAttended} session{v.sessionsAttended !== 1 ? 's' : ''}</div>
+                </div>
+              </div>
+            ))}
+          </>
+        ))}
+
+      </div>
+    </div>
+  );
+}
+
 // ─── MAIN PAGE ─────────────────────────────────────────────────────────────────
 
 export default function Home() {
@@ -101,6 +346,9 @@ export default function Home() {
   const [topicFilter, setTopicFilter] = useState('');
 
   const [csvFiles, setCsvFiles] = useState([]);
+  const [csvProgress, setCsvProgress] = useState(null); // { done, total }
+  const [importingCSVs, setImportingCSVs] = useState(false);
+
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [progress, setProgress] = useState(0);
@@ -109,19 +357,57 @@ export default function Home() {
 
   const [sessions, setSessions] = useState(null);
   const [volunteers, setVolunteers] = useState(null);
+  const [unidentified, setUnidentified] = useState(null);
+  const [libraryMeta, setLibraryMeta] = useState(null); // { savedAt, sessionCount, dateRange }
 
   const [tab, setTab] = useState('sessions');
   const [sortBy, setSortBy] = useState('rate');
   const [tierFilter, setTierFilter] = useState('all');
   const [search, setSearch] = useState('');
 
+  // Load from localStorage on first mount
+  useEffect(() => {
+    const saved = loadLibrary();
+    if (saved?.sessions?.length > 0) {
+      const { volunteers: v, unidentified: u } = aggregate(saved.sessions);
+      const sorted = v.sort((a, b) => b.attendanceRate - a.attendanceRate);
+      setSessions(saved.sessions);
+      setVolunteers(sorted);
+      setUnidentified(u);
+      const dates = saved.sessions.map(s => s.date).sort();
+      setLibraryMeta({
+        savedAt: saved.savedAt,
+        sessionCount: saved.sessions.length,
+        dateRange: `${dates[0]} → ${dates[dates.length - 1]}`,
+      });
+    }
+  }, []);
+
+  // ── Helpers ─────────────────────────────────────────────────────────────────
+
+  const applyAndSave = (allSessions) => {
+    const merged = sessions ? mergeSessions(sessions, allSessions) : allSessions;
+    const { volunteers: v, unidentified: u } = aggregate(merged);
+    const sorted = v.sort((a, b) => b.attendanceRate - a.attendanceRate);
+    setSessions(merged);
+    setVolunteers(sorted);
+    setUnidentified(u);
+    saveLibrary(merged);
+    const dates = merged.map(s => s.date).sort();
+    setLibraryMeta({
+      savedAt: new Date().toISOString(),
+      sessionCount: merged.length,
+      dateRange: `${dates[0]} → ${dates[dates.length - 1]}`,
+    });
+  };
+
+  // ── Pull live API data ───────────────────────────────────────────────────────
+
   const handleFetch = useCallback(async () => {
     setError('');
     setLoading(true);
     setProgress(0);
     setProgressTotal(0);
-    setSessions(null);
-    setVolunteers(null);
 
     try {
       setStatusMsg('Authenticating with Zoom…');
@@ -174,34 +460,46 @@ export default function Home() {
           date: (m.start_time || '').slice(0, 10),
           duration: m.duration,
           participants,
+          source: 'api',
         });
         if (i < allMeetings.length - 1) await sleep(DELAY_MS);
       }
 
-      const vol = aggregate(enriched);
-
-      // Merge historical CSV sessions if any were uploaded
-      let allSessions = enriched;
-      if (csvFiles.length > 0) {
-        setStatusMsg('Parsing historical CSV files…');
-        const historicalSessions = await parseHistoricalCSVs(csvFiles);
-        // Deduplicate: if a session date+topic already exists from API, prefer API version
-        const apiKeys = new Set(enriched.map(s => `${s.date}__${s.topic}`));
-        const newHistorical = historicalSessions.filter(s => !apiKeys.has(`${s.date}__${s.topic}`));
-        allSessions = [...enriched, ...newHistorical].sort((a, b) => b.date.localeCompare(a.date));
-        setStatusMsg('');
-      }
-
-      const volFinal = aggregate(allSessions);
-      setSessions(allSessions);
-      setVolunteers(volFinal.sort((a, b) => b.attendanceRate - a.attendanceRate));
+      applyAndSave(enriched);
       setStatusMsg('');
     } catch (e) {
       setError(e.message || 'Something went wrong.');
     } finally {
       setLoading(false);
     }
-  }, [fromDate, toDate, topicFilter, csvFiles]);
+  }, [fromDate, toDate, topicFilter, sessions]);
+
+  // ── Import CSVs to library ───────────────────────────────────────────────────
+
+  const handleImportCSVs = useCallback(async () => {
+    if (!csvFiles.length) return;
+    setImportingCSVs(true);
+    setCsvProgress({ done: 0, total: csvFiles.length });
+    setError('');
+    try {
+      const parsed = await parseHistoricalCSVs(csvFiles, (done, total) => {
+        setCsvProgress({ done, total });
+      });
+      if (parsed.length === 0) {
+        setError('No sessions parsed from the uploaded files. Check the file format.');
+        return;
+      }
+      applyAndSave(parsed);
+      setCsvFiles([]);
+    } catch (e) {
+      setError(e.message || 'CSV import failed.');
+    } finally {
+      setImportingCSVs(false);
+      setCsvProgress(null);
+    }
+  }, [csvFiles, sessions]);
+
+  // ── Filtered / sorted volunteer list ────────────────────────────────────────
 
   const filteredVolunteers = useMemo(() => {
     if (!volunteers) return [];
@@ -224,31 +522,27 @@ export default function Home() {
     return {
       totalSessions: sessions.length,
       totalUnique: volunteers.length,
-      avgRate: volunteers.reduce((s, v) => s + v.attendanceRate, 0) / volunteers.length,
+      avgRate: volunteers.reduce((s, v) => s + v.attendanceRate, 0) / (volunteers.length || 1),
       highCount: volunteers.filter(v => v.tier === 'high').length,
       atRisk: volunteers.filter(v => v.tier === 'low').length,
+      unidCount: unidentified?.length || 0,
     };
-  }, [sessions, volunteers]);
+  }, [sessions, volunteers, unidentified]);
 
   const pct = progressTotal ? Math.round((progress / progressTotal) * 100) : null;
 
   // ── STYLES ──────────────────────────────────────────────────────────────────
   const inputStyle = {
-    width: '100%',
-    background: '#0a1520',
-    border: '1px solid #1e3040',
-    borderRadius: 8,
-    padding: '10px 13px',
-    color: '#c8dce8',
-    fontSize: 13,
-    transition: 'border-color 0.15s',
-    colorScheme: 'dark',
+    width: '100%', background: '#0a1520', border: '1px solid #1e3040',
+    borderRadius: 8, padding: '10px 13px', color: '#c8dce8', fontSize: 13,
+    transition: 'border-color 0.15s', colorScheme: 'dark',
   };
-
   const labelStyle = {
     fontSize: 11, color: '#8fa3b1', display: 'block',
     marginBottom: 6, letterSpacing: '0.05em', textTransform: 'uppercase',
   };
+
+  const TABS = ['sessions', 'volunteers', 'trends'];
 
   return (
     <>
@@ -280,6 +574,37 @@ export default function Home() {
               Keep Altadena Together · Zoom Reports
             </div>
           </div>
+
+          {/* Library status in header */}
+          {libraryMeta && (
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontSize: 11, color: '#00c2a8' }}>
+                  Library: {libraryMeta.sessionCount} sessions saved
+                </div>
+                <div style={{ fontSize: 10, color: '#2a4d3a' }}>
+                  {libraryMeta.dateRange}
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  if (confirm('Clear all saved data from this browser? This cannot be undone.')) {
+                    clearLibrary();
+                    setSessions(null);
+                    setVolunteers(null);
+                    setUnidentified(null);
+                    setLibraryMeta(null);
+                  }
+                }}
+                style={{
+                  background: 'none', border: '1px solid #2a1a1a', borderRadius: 6,
+                  padding: '4px 10px', color: '#553333', fontSize: 11, cursor: 'pointer',
+                }}
+              >
+                Clear Library
+              </button>
+            </div>
+          )}
         </div>
 
         <div style={{ maxWidth: 1140, margin: '0 auto', padding: '32px 24px' }}>
@@ -289,10 +614,11 @@ export default function Home() {
             background: '#0d1e2b', border: '1px solid #1a2e3a',
             borderRadius: 16, padding: '28px 32px', marginBottom: 28,
           }}>
-            <div style={{ fontSize: 11, color: '#556677', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 20 }}>
-              Date Range & Filters
-            </div>
 
+            {/* Live API pull */}
+            <div style={{ fontSize: 11, color: '#556677', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 20 }}>
+              Pull Live Data from Zoom
+            </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr auto', gap: 16, alignItems: 'end' }}>
               <div>
                 <label style={labelStyle}>From</label>
@@ -309,7 +635,7 @@ export default function Home() {
                   onBlur={e => e.target.style.borderColor = '#1e3040'} />
               </div>
               <div>
-                <label style={labelStyle}>Topic Filter <span style={{ color: '#2a3d4d' }}>(optional — filters by meeting name)</span></label>
+                <label style={labelStyle}>Topic Filter <span style={{ color: '#2a3d4d' }}>(optional — partial match)</span></label>
                 <input type="text" value={topicFilter} onChange={e => setTopicFilter(e.target.value)}
                   placeholder="e.g. Captain Sync, Zone Meeting…"
                   style={inputStyle}
@@ -321,12 +647,10 @@ export default function Home() {
                 disabled={loading}
                 style={{
                   background: loading ? '#1a2e3a' : 'linear-gradient(135deg, #00c2a8, #0077b6)',
-                  color: loading ? '#556677' : '#fff',
-                  border: 'none', borderRadius: 8,
+                  color: loading ? '#556677' : '#fff', border: 'none', borderRadius: 8,
                   padding: '10px 28px', fontSize: 13, fontWeight: 600,
                   cursor: loading ? 'not-allowed' : 'pointer',
-                  whiteSpace: 'nowrap', letterSpacing: '0.03em',
-                  transition: 'opacity 0.2s',
+                  whiteSpace: 'nowrap', letterSpacing: '0.03em', transition: 'opacity 0.2s',
                 }}
               >
                 {loading
@@ -335,49 +659,7 @@ export default function Home() {
               </button>
             </div>
 
-            {/* Historical CSV Upload */}
-            <div style={{ marginTop: 20, paddingTop: 20, borderTop: '1px solid #1a2e3a' }}>
-              <div style={{ fontSize: 11, color: '#556677', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 10 }}>
-                Historical Data <span style={{ color: '#2a3d4d' }}>(optional — upload Zoom participant CSVs for dates before API range)</span>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-                <label style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 8,
-                  background: '#0a1520', border: '1px dashed #1e3040',
-                  borderRadius: 8, padding: '9px 16px', cursor: 'pointer',
-                  fontSize: 12, color: '#8fa3b1', transition: 'border-color 0.15s',
-                }}
-                  onMouseEnter={e => e.currentTarget.style.borderColor = '#00c2a8'}
-                  onMouseLeave={e => e.currentTarget.style.borderColor = '#1e3040'}
-                >
-                  <span style={{ fontSize: 16 }}>📂</span>
-                  {csvFiles.length === 0 ? 'Upload participant CSVs…' : `${csvFiles.length} file${csvFiles.length !== 1 ? 's' : ''} selected`}
-                  <input
-                    type="file"
-                    accept=".csv"
-                    multiple
-                    style={{ display: 'none' }}
-                    onChange={e => setCsvFiles(Array.from(e.target.files))}
-                  />
-                </label>
-                {csvFiles.length > 0 && (
-                  <>
-                    <div style={{ fontSize: 11, color: '#556677' }}>
-                      {csvFiles.map(f => f.name).join(', ').slice(0, 80)}{csvFiles.map(f => f.name).join(', ').length > 80 ? '…' : ''}
-                    </div>
-                    <button
-                      onClick={() => setCsvFiles([])}
-                      style={{ background: 'none', border: 'none', color: '#e05252', cursor: 'pointer', fontSize: 12 }}
-                    >✕ Clear</button>
-                  </>
-                )}
-              </div>
-              {csvFiles.length > 0 && (
-                <div style={{ marginTop: 8, fontSize: 11, color: '#2a4d3a' }}>
-                  ✓ These will be merged with live API data when you click Pull Data. Sessions already in the API range won't be duplicated.
-                </div>
-              )}
-            </div>
+            {/* Progress bar for API fetch */}
             {loading && (
               <div style={{ marginTop: 18 }}>
                 <div style={{ fontSize: 12, color: '#556677', marginBottom: 7 }}>{statusMsg}</div>
@@ -392,6 +674,67 @@ export default function Home() {
                 )}
               </div>
             )}
+
+            {/* Historical CSV Import — separate from API pull */}
+            <div style={{ marginTop: 24, paddingTop: 24, borderTop: '1px solid #1a2e3a' }}>
+              <div style={{ fontSize: 11, color: '#556677', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 10 }}>
+                Import Historical CSVs to Library
+                <span style={{ color: '#2a3d4d', textTransform: 'none', letterSpacing: 0, marginLeft: 8 }}>
+                  — merge into saved library without re-fetching API
+                </span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <label style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 8,
+                  background: '#0a1520', border: '1px dashed #1e3040',
+                  borderRadius: 8, padding: '9px 16px', cursor: 'pointer',
+                  fontSize: 12, color: '#8fa3b1', transition: 'border-color 0.15s',
+                }}
+                  onMouseEnter={e => e.currentTarget.style.borderColor = '#00c2a8'}
+                  onMouseLeave={e => e.currentTarget.style.borderColor = '#1e3040'}
+                >
+                  📂
+                  {csvFiles.length === 0
+                    ? 'Select participant CSVs…'
+                    : `${csvFiles.length} file${csvFiles.length !== 1 ? 's' : ''} selected`}
+                  <input type="file" accept=".csv" multiple style={{ display: 'none' }}
+                    onChange={e => setCsvFiles(Array.from(e.target.files))} />
+                </label>
+
+                {csvFiles.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 11, color: '#556677', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {csvFiles.map(f => f.name).join(', ')}
+                    </div>
+                    <button
+                      onClick={handleImportCSVs}
+                      disabled={importingCSVs}
+                      style={{
+                        background: importingCSVs ? '#1a2e3a' : '#0a2a1a',
+                        border: '1px solid #00c2a855', borderRadius: 8,
+                        padding: '9px 20px', color: importingCSVs ? '#556677' : '#00c2a8',
+                        fontSize: 12, fontWeight: 600, cursor: importingCSVs ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      {importingCSVs
+                        ? csvProgress ? `Parsing ${csvProgress.done}/${csvProgress.total}…` : 'Parsing…'
+                        : `Import ${csvFiles.length} file${csvFiles.length !== 1 ? 's' : ''} →`}
+                    </button>
+                    <button
+                      onClick={() => setCsvFiles([])}
+                      style={{ background: 'none', border: 'none', color: '#e05252', cursor: 'pointer', fontSize: 12 }}
+                    >
+                      ✕ Clear
+                    </button>
+                  </>
+                )}
+              </div>
+              {csvFiles.length > 0 && !importingCSVs && (
+                <div style={{ marginTop: 8, fontSize: 11, color: '#2a4d3a' }}>
+                  These will be merged with any existing library data. Duplicate sessions (same meeting ID or date+topic) will be deduplicated, preferring API data.
+                </div>
+              )}
+            </div>
 
             {error && (
               <div style={{
@@ -409,17 +752,18 @@ export default function Home() {
             <div style={{ animation: 'fadeIn 0.4s ease' }}>
 
               {/* Stats */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 24 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12, marginBottom: 24 }}>
                 <StatCard label="Total Sessions" value={stats.totalSessions} accent="#0077b6" />
-                <StatCard label="Unique Participants" value={stats.totalUnique} accent="#00c2a8" />
-                <StatCard label="Avg Attendance Rate" value={`${(stats.avgRate * 100).toFixed(0)}%`} accent="#f0b429" />
+                <StatCard label="Unique Volunteers" value={stats.totalUnique} accent="#00c2a8" />
+                <StatCard label="Avg Attendance" value={`${(stats.avgRate * 100).toFixed(0)}%`} accent="#f0b429" />
                 <StatCard label="Highly Engaged" value={stats.highCount} sub="≥75% attendance" accent="#00c2a8" />
                 <StatCard label="At Risk" value={stats.atRisk} sub="<40% attendance" accent="#e05252" />
+                <StatCard label="Unidentified" value={stats.unidCount} sub="phones / devices" accent="#334455" />
               </div>
 
               {/* Tabs */}
               <div style={{ display: 'flex', borderBottom: '1px solid #1a2e3a', marginBottom: 0 }}>
-                {['sessions', 'volunteers'].map(t => (
+                {TABS.map(t => (
                   <button key={t} onClick={() => setTab(t)} style={{
                     background: 'none', border: 'none', cursor: 'pointer',
                     borderBottom: tab === t ? '2px solid #00c2a8' : '2px solid transparent',
@@ -428,9 +772,9 @@ export default function Home() {
                     textTransform: 'capitalize', letterSpacing: '0.05em',
                     marginBottom: -1, transition: 'color 0.15s',
                   }}>
-                    {t === 'sessions'
-                      ? `Sessions (${sessions.length})`
-                      : `Volunteers (${volunteers.length})`}
+                    {t === 'sessions' ? `Sessions (${sessions.length})`
+                      : t === 'volunteers' ? `Volunteers (${volunteers.length})`
+                      : 'Trends'}
                   </button>
                 ))}
               </div>
@@ -521,7 +865,7 @@ export default function Home() {
                     <div style={{ textAlign: 'center' }}>Status</div>
                   </div>
 
-                  {/* Rows */}
+                  {/* Volunteer Rows */}
                   {filteredVolunteers.map((v, i) => (
                     <div key={v.email || v.name + i} style={{
                       display: 'grid',
@@ -563,10 +907,59 @@ export default function Home() {
                       No volunteers match this filter.
                     </div>
                   )}
+
+                  {/* Unidentified participants section */}
+                  {unidentified?.length > 0 && (
+                    <details style={{ borderTop: '2px solid #1a2e3a' }}>
+                      <summary style={{
+                        padding: '12px 20px', cursor: 'pointer', fontSize: 12,
+                        color: '#334455', listStyle: 'none', userSelect: 'none',
+                      }}>
+                        ▸ {unidentified.length} unidentified participants excluded from stats
+                        <span style={{ fontSize: 11, color: '#2a3040', marginLeft: 8 }}>
+                          (phone numbers, device names — click to expand)
+                        </span>
+                      </summary>
+                      <div style={{ padding: '0 20px 16px' }}>
+                        <div style={{ fontSize: 11, color: '#2a3d4d', marginBottom: 10 }}>
+                          These participants joined with a phone number or generic device name. They are not counted in any engagement metrics.
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                          {unidentified.map((u, i) => (
+                            <span key={i} style={{
+                              background: '#111822', border: '1px solid #1a2630',
+                              borderRadius: 4, padding: '3px 9px', fontSize: 11, color: '#334455',
+                            }} title={`Appeared in ${u.sessionsAttended} session(s)`}>
+                              {u.name}
+                              <span style={{ color: '#223040', marginLeft: 5 }}>{u.sessionsAttended}×</span>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </details>
+                  )}
                 </div>
               )}
+
+              {/* Trends Tab */}
+              {tab === 'trends' && (
+                <TrendsTab sessions={sessions} volunteers={volunteers} />
+              )}
+
             </div>
           )}
+
+          {/* Empty state when nothing loaded yet */}
+          {!stats && !loading && (
+            <div style={{
+              textAlign: 'center', padding: '60px 40px',
+              color: '#2a3d4d', fontSize: 14,
+            }}>
+              <div style={{ fontSize: 32, marginBottom: 12, opacity: 0.4 }}>📊</div>
+              Pull live data from Zoom above, or import historical CSVs to get started.
+            </div>
+          )}
+
         </div>
       </div>
     </>
