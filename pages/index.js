@@ -1,11 +1,22 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import Head from 'next/head';
 import {
-  getToken, getAllUserIds, chunkDateRange,
+  getToken, getAllUsers, chunkDateRange,
   fetchMeetingsInRange, fetchParticipants,
   aggregate, exportCSV, parseHistoricalCSVs, sleep, DELAY_MS,
-  saveLibrary, loadLibrary, clearLibrary, mergeSessions,
+  saveLibrary, loadLibrary, clearLibrary, mergeSessions, storeZoomSessions,
 } from '../lib/zoom';
+
+const MEETING_CLASSIFICATIONS = [
+  ['unclassified', 'Unclassified'],
+  ['captain', 'Captain meeting'],
+  ['working_group', 'Working group (optional)'],
+  ['captain_support', 'Captain support / coaching'],
+  ['onboarding', 'Onboarding'],
+  ['community', 'Community / neighborhood'],
+  ['internal', 'Internal / staff'],
+  ['test_exclude', 'Test or exclude'],
+];
 
 // ─── SMALL COMPONENTS ─────────────────────────────────────────────────────────
 
@@ -28,9 +39,9 @@ function StatCard({ label, value, sub, accent = '#00c2a8' }) {
 
 function Badge({ tier }) {
   const map = {
-    high: { bg: '#00c2a822', color: '#00c2a8', label: 'Active' },
-    mid:  { bg: '#f0b42922', color: '#f0b429', label: 'Sporadic' },
-    low:  { bg: '#e0525222', color: '#e05252', label: 'At Risk' },
+    high: { bg: '#00c2a822', color: '#00c2a8', label: 'Frequent' },
+    mid:  { bg: '#f0b42922', color: '#f0b429', label: 'Occasional' },
+    low:  { bg: '#e0525222', color: '#e05252', label: 'Infrequent' },
   };
   const { bg, color, label } = map[tier] || map.low;
   return (
@@ -89,6 +100,868 @@ function SessionRow({ session, index }) {
         </div>
       )}
     </div>
+  );
+}
+
+function CaptainDirectory() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [syncingDashboard, setSyncingDashboard] = useState(false);
+  const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
+  const [zone, setZone] = useState('all');
+  const [reviewOnly, setReviewOnly] = useState(false);
+  const [expandedId, setExpandedId] = useState(null);
+
+  const loadRoster = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const response = await fetch('/api/captains');
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Captain roster could not be loaded.');
+      setData(body);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadRoster();
+  }, [loadRoster]);
+
+  useEffect(() => {
+    const refresh = () => loadRoster();
+    window.addEventListener('engagement-data-updated', refresh);
+    return () => window.removeEventListener('engagement-data-updated', refresh);
+  }, [loadRoster]);
+
+  const syncRoster = async () => {
+    setSyncing(true);
+    setError('');
+    try {
+      const response = await fetch('/api/sync-airtable', { method: 'POST' });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Airtable sync failed.');
+      await loadRoster();
+      window.dispatchEvent(new Event('engagement-data-updated'));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const syncDashboard = async () => {
+    setSyncingDashboard(true);
+    setError('');
+    try {
+      const response = await fetch('/api/sync-dashboard-access', { method: 'POST' });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Dashboard access sync failed.');
+      await loadRoster();
+      window.dispatchEvent(new Event('engagement-data-updated'));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSyncingDashboard(false);
+    }
+  };
+
+  const issuesByCaptain = useMemo(() => {
+    const index = new Map();
+    for (const issue of data?.issues || []) {
+      for (const id of [issue.captain_record_id, issue.related_record_id].filter(Boolean)) {
+        const current = index.get(id) || [];
+        current.push(issue);
+        index.set(id, current);
+      }
+    }
+    return index;
+  }, [data]);
+
+  const zones = useMemo(() => {
+    const values = new Set();
+    for (const captain of data?.captains || []) {
+      String(captain.zones || '').split('|').map(z => z.trim()).filter(Boolean)
+        .forEach(z => values.add(z));
+    }
+    return [...values].sort();
+  }, [data]);
+
+  const filteredCaptains = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return (data?.captains || []).filter(captain => {
+      const matchesSearch = !term || [
+        captain.full_name,
+        captain.email,
+        captain.dashboard_gmail,
+        captain.phone,
+        captain.address,
+        captain.zones,
+      ].some(value => String(value || '').toLowerCase().includes(term));
+      const matchesZone = zone === 'all' || String(captain.zones || '')
+        .split('|').map(value => value.trim()).includes(zone);
+      const matchesReview = !reviewOnly || issuesByCaptain.has(captain.airtable_record_id);
+      return matchesSearch && matchesZone && matchesReview;
+    });
+  }, [data, issuesByCaptain, reviewOnly, search, zone]);
+
+  const latestSync = data?.latestSync?.synced_at
+    ? new Date(data.latestSync.synced_at).toLocaleString()
+    : 'Not synchronized';
+
+  if (loading && !data) {
+    return (
+      <div className="captain-loading">
+        <div className="captain-loading-line" />
+        Reading the captain roster from Google Sheets…
+      </div>
+    );
+  }
+
+  return (
+    <section className="captain-directory">
+      <div className="captain-directory-heading">
+        <div>
+          <div className="section-kicker">Canonical roster</div>
+          <h2>Neighborhood Captains</h2>
+          <p>
+            Airtable roster plus transparent Zoom, Zone Dashboard, and mailbox signals.
+            Identity merges stay manual.
+          </p>
+        </div>
+        <div className="roster-sync">
+          <span>Airtable {latestSync}</span>
+          {data?.latestZoomSync && (
+            <span>
+              Zoom: {data.summary.zoomSessions} sessions · {data.summary.zoomReviews} identity reviews
+            </span>
+          )}
+          {data?.latestDashboardSync && (
+            <span>
+              Dashboard: {data.summary.dashboardMatched || 0} matched · {data.summary.dashboardReviews || 0} reviews
+            </span>
+          )}
+          <button onClick={syncRoster} disabled={syncing || syncingDashboard}>
+            {syncing ? 'Synchronizing…' : 'Sync Airtable'}
+          </button>
+          <button onClick={syncDashboard} disabled={syncing || syncingDashboard}>
+            {syncingDashboard ? 'Syncing dashboard…' : 'Sync Dashboard Access'}
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="captain-error">{error}</div>}
+
+      {data && (
+        <>
+          <div className="roster-stats">
+            <StatCard label="Current Captains" value={data.summary.captains} accent="#00c2a8" />
+            <StatCard label="Zones Represented" value={data.summary.zones} accent="#4d8cc9" />
+            <StatCard label="Zoom Sessions" value={data.summary.zoomSessions} accent="#4d8cc9" />
+            <StatCard label="Matched Attendance" value={data.summary.matchedZoomAttendances} accent="#00c2a8" />
+            <StatCard label="Dashboard Matched" value={data.summary.dashboardMatched || 0} accent="#4d8cc9" />
+            <StatCard label="Mailbox Events" value={data.summary.emailEvents || 0} accent="#00c2a8" />
+            <StatCard
+              label="Roster Review Flags"
+              value={data.summary.missingResidentIds + data.summary.reviewFlags}
+              accent="#f0b429"
+            />
+          </div>
+
+          <div className="captain-roster-shell">
+            <div className="captain-controls">
+              <input
+                type="search"
+                value={search}
+                onChange={event => setSearch(event.target.value)}
+                placeholder="Search names, emails, phones, or addresses"
+              />
+              <select value={zone} onChange={event => setZone(event.target.value)}>
+                <option value="all">Every zone</option>
+                {zones.map(value => <option key={value} value={value}>{value}</option>)}
+              </select>
+              <button
+                className={reviewOnly ? 'review-toggle active' : 'review-toggle'}
+                onClick={() => setReviewOnly(value => !value)}
+              >
+                Needs review
+                <span>{data.summary.missingResidentIds + data.summary.reviewFlags}</span>
+              </button>
+              <div className="captain-result-count">
+                {filteredCaptains.length} of {data.summary.captains}
+              </div>
+            </div>
+
+            <div className="captain-table-header">
+              <span>Captain</span>
+              <span>Zone</span>
+              <span>Engagement status</span>
+              <span>Last organizer note</span>
+              <span>Data health</span>
+            </div>
+
+            {filteredCaptains.map((captain, index) => {
+              const captainIssues = issuesByCaptain.get(captain.airtable_record_id) || [];
+              const expanded = expandedId === captain.airtable_record_id;
+              return (
+                <div
+                  className={expanded ? 'captain-record expanded' : 'captain-record'}
+                  key={captain.airtable_record_id}
+                  style={{ animationDelay: `${Math.min(index, 20) * 0.018}s` }}
+                >
+                  <button
+                    className="captain-record-summary"
+                    onClick={() => setExpandedId(expanded ? null : captain.airtable_record_id)}
+                    aria-expanded={expanded}
+                  >
+                    <span className="captain-name-cell">
+                      <strong>{captain.full_name || 'Unnamed captain'}</strong>
+                      <small>{captain.email || captain.dashboard_gmail || 'No email recorded'}</small>
+                    </span>
+                    <span>{captain.zones || 'Unassigned'}</span>
+                    <span>{captain.engagement_status || 'Not marked'}</span>
+                    <span className="mono-cell">
+                      {captain.last_organizer_recorded_interaction || 'No date'}
+                    </span>
+                    <span>
+                      {captainIssues.length
+                        ? <span className="review-badge">{captainIssues.length} to review</span>
+                        : <span className="clean-badge">Complete</span>}
+                    </span>
+                  </button>
+
+                  {expanded && (
+                    <div className="captain-record-detail">
+                      <div className="captain-facts">
+                        {[
+                          ['Resident ID', captain.resident_id || 'Missing'],
+                          ['Address', captain.address || 'Not recorded'],
+                          ['Phone', captain.phone || 'Not recorded'],
+                          ['Dashboard Gmail', captain.dashboard_gmail || 'Not recorded'],
+                          ['Additional emails', captain.additional_email_addresses || 'None'],
+                          ['Date trained', captain.date_trained || 'Not recorded'],
+                          ['Captain meetings attended', captain.zoom?.captainMeetingsAttended || 'None yet'],
+                          [
+                            'Eligible captain-meeting attendance',
+                            captain.zoom?.captainMeetingAttendanceRate == null
+                              ? 'No eligible sessions'
+                              : `${captain.zoom.eligibleCaptainMeetingsAttended}/${captain.zoom.eligibleCaptainMeetings} (${Math.round(captain.zoom.captainMeetingAttendanceRate * 100)}%)`,
+                          ],
+                          ['Working-group participation', captain.zoom?.workingGroupParticipations || 'None yet'],
+                          ['Captain-support interactions', captain.zoom?.captainSupportInteractions || 'None yet'],
+                          ['Onboarding milestone', captain.zoom?.onboardingMilestone || 'Not observed'],
+                          ['Community meetings hosted', captain.zoom?.communitySessionsHosted || 'None yet'],
+                          ['Other meetings hosted', captain.zoom?.otherSessionsHosted || 'None yet'],
+                          ['Last observed Zoom activity', captain.signals?.find(signal => signal.key === 'last_zoom_activity')?.value || 'Not observed'],
+                          ['Zoom activity trend', captain.signals?.find(signal => signal.key === 'zoom_trend')?.value || 'Not enough history'],
+                          ['Last meeting hosted', captain.zoom?.lastHosted || 'Not observed'],
+                          ['Last Zone Dashboard access', captain.dashboard?.lastSeenAt || 'Not observed'],
+                          ['Dashboard logins recorded', captain.dashboard ? captain.dashboard.loginCount : 'Not observed'],
+                          ['Mailbox interactions', captain.email
+                            ? `${captain.email.total} (${captain.email.inbound} in / ${captain.email.outbound} out)`
+                            : 'Not observed'],
+                          ['Last mailbox activity', captain.email?.lastAt || 'Not observed'],
+                          ['Last updated by', captain.last_updated_by || 'Not recorded'],
+                          ['Shirt status', captain.shirt_status || 'Not recorded'],
+                          ['Special opportunity', captain.special_opportunity || 'None'],
+                        ].map(([label, value]) => (
+                          <div key={label}>
+                            <label>{label}</label>
+                            <span>{value}</span>
+                          </div>
+                        ))}
+                      </div>
+
+                      {captain.signals?.length > 0 && (
+                        <details className="signal-evidence">
+                          <summary>Why these signals appear</summary>
+                          {captain.signals.map(signal => (
+                            <div key={signal.key}>
+                              <strong>{signal.label}: {signal.value}</strong>
+                              <span>{signal.reason}</span>
+                              <small>Source: {signal.source}</small>
+                            </div>
+                          ))}
+                        </details>
+                      )}
+
+                      {(captain.notes_bio || captainIssues.length > 0) && (
+                        <div className="captain-context">
+                          {captain.notes_bio && (
+                            <div>
+                              <label>Organizer notes / bio</label>
+                              <p>{captain.notes_bio}</p>
+                            </div>
+                          )}
+                          {captainIssues.length > 0 && (
+                            <div>
+                              <label>Needs review</label>
+                              <ul>
+                                {captainIssues.map(issue => (
+                                  <li key={issue.issue_key}>
+                                    <strong>{issue.confidence} confidence</strong>
+                                    {issue.message}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {filteredCaptains.length === 0 && (
+              <div className="captain-empty">No captain records match these filters.</div>
+            )}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function IdentityReviewRow({ item, captains, busy, onDecision }) {
+  const [captainId, setCaptainId] = useState(
+    item.suggestions?.[0]?.captainRecordId || ''
+  );
+
+  return (
+    <article className="identity-review-row">
+      <div className="identity-review-main">
+        <div className="identity-review-title">
+          <strong>{item.displayName}</strong>
+          {item.email && <span>{item.email}</span>}
+        </div>
+        <div className="identity-review-meta">
+          <span>{item.appearances} appearance{item.appearances !== 1 ? 's' : ''}</span>
+          <span>{item.sessions} session{item.sessions !== 1 ? 's' : ''}</span>
+          <span>{item.firstSeen}{item.lastSeen !== item.firstSeen ? ` – ${item.lastSeen}` : ''}</span>
+        </div>
+        <div className="identity-review-topics">
+          {item.topics.map(topic => <span key={topic}>{topic}</span>)}
+        </div>
+        <div className="identity-review-reason">{item.reasons.join(' · ')}</div>
+        {item.suggestions?.length > 0 && (
+          <div className="identity-suggestions">
+            Suggested: {item.suggestions.map(suggestion =>
+              `${suggestion.name} (${suggestion.score}% name match)`
+            ).join(' · ')}
+          </div>
+        )}
+      </div>
+      <div className="identity-review-actions">
+        <label>Link to a captain</label>
+        <select value={captainId} onChange={event => setCaptainId(event.target.value)}>
+          <option value="">Choose a captain…</option>
+          {captains.map(captain => (
+            <option key={captain.airtableRecordId} value={captain.airtableRecordId}>
+              {captain.name}{captain.zone ? ` · ${captain.zone}` : ''}
+            </option>
+          ))}
+        </select>
+        <button
+          className="primary-review-action"
+          disabled={busy || !captainId}
+          onClick={() => onDecision(item, 'linked', captainId)}
+        >
+          Link identity
+        </button>
+        <div className="secondary-review-actions">
+          <button disabled={busy} onClick={() => onDecision(item, 'non_captain')}>
+            Not a captain
+          </button>
+          <button disabled={busy} onClick={() => onDecision(item, 'ignored')}>
+            Ignore
+          </button>
+          <button disabled={busy} onClick={() => onDecision(item, 'needs_research')}>
+            Research later
+          </button>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function SessionOverrideRow({ session, captains, busy, onSave }) {
+  const [classification, setClassification] = useState(session.classification);
+  const [expectedZone, setExpectedZone] = useState(session.expectedZone || '');
+  const [hostCaptainId, setHostCaptainId] = useState(
+    session.hostCaptainRecordId || ''
+  );
+  useEffect(() => {
+    setClassification(session.classification);
+    setExpectedZone(session.expectedZone || '');
+    setHostCaptainId(session.hostCaptainRecordId || '');
+  }, [session]);
+
+  return (
+    <div className="session-override-row">
+      <div className="session-override-summary">
+        <strong>{session.date || 'Undated session'}</strong>
+        <span>{session.durationMinutes} min</span>
+        <span>{session.attendanceRecords} attendance records</span>
+        <span className={`meeting-type ${session.classification}`}>
+          {session.classification.replaceAll('_', ' ')}
+        </span>
+        <small>
+          {session.classificationSource === 'session_override'
+            ? 'Session override'
+            : 'Inherits series default'}
+        </small>
+      </div>
+      <div className="session-override-actions">
+        <select
+          value={classification}
+          onChange={event => setClassification(event.target.value)}
+        >
+          {MEETING_CLASSIFICATIONS.map(([value, label]) => (
+            <option key={value} value={value}>{label}</option>
+          ))}
+        </select>
+        <input
+          value={expectedZone}
+          onChange={event => setExpectedZone(event.target.value)}
+          placeholder="Zone override (optional)"
+        />
+        <select
+          value={hostCaptainId}
+          onChange={event => setHostCaptainId(event.target.value)}
+        >
+          <option value="">Inherit series host / use Zoom identity</option>
+          {captains.map(captain => (
+            <option key={captain.airtableRecordId} value={captain.airtableRecordId}>
+              Hosted by {captain.name}{captain.zone ? ` · ${captain.zone}` : ''}
+            </option>
+          ))}
+        </select>
+        <button
+          disabled={busy}
+          onClick={() => onSave(
+            session,
+            classification,
+            expectedZone,
+            hostCaptainId
+          )}
+        >
+          {busy ? 'Saving…' : 'Save session override'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function MeetingReviewRow({
+  meeting,
+  captains,
+  busy,
+  busyKey,
+  onSave,
+  onSaveOverride,
+}) {
+  const [classification, setClassification] = useState(meeting.classification);
+  const [expectedZone, setExpectedZone] = useState(meeting.expectedZone || '');
+  const [hostCaptainId, setHostCaptainId] = useState(
+    meeting.hostCaptainRecordId || ''
+  );
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    setClassification(meeting.classification);
+    setExpectedZone(meeting.expectedZone || '');
+    setHostCaptainId(meeting.hostCaptainRecordId || '');
+  }, [meeting]);
+  const changed = classification !== meeting.classification
+    || expectedZone !== (meeting.expectedZone || '')
+    || hostCaptainId !== (meeting.hostCaptainRecordId || '');
+
+  return (
+    <article className="meeting-review-row">
+      <div className="meeting-review-main">
+        <div className="meeting-review-title">
+          <strong>{meeting.topic}</strong>
+          <span className={`meeting-type ${meeting.classification}`}>
+            {meeting.classification.replaceAll('_', ' ')}
+          </span>
+          {meeting.mixedClassifications && (
+            <span className="mixed-classification">Mixed sessions</span>
+          )}
+        </div>
+        <div className="meeting-review-meta">
+          <span>{meeting.sessions} session{meeting.sessions !== 1 ? 's' : ''}</span>
+          <span>{meeting.attendanceRecords} attendance records</span>
+          <span>{meeting.matchedCaptains} matched captains</span>
+          <span>{meeting.unmatched} unresolved</span>
+        </div>
+        {(meeting.hostNames.length > 0 || meeting.hostCaptains.length > 0) && (
+          <div className="meeting-host-line">
+            Host observed: {meeting.hostCaptains.length
+              ? meeting.hostCaptains.join(', ')
+              : meeting.hostNames.join(', ')}
+            {meeting.hostCaptains.length > 0 && (
+              <strong> · captain hosting credit available</strong>
+            )}
+          </div>
+        )}
+      </div>
+      <div className="meeting-review-actions">
+        <select
+          value={classification}
+          onChange={event => setClassification(event.target.value)}
+        >
+          {MEETING_CLASSIFICATIONS.map(([value, label]) => (
+            <option key={value} value={value}>{label}</option>
+          ))}
+        </select>
+        <input
+          value={expectedZone}
+          onChange={event => setExpectedZone(event.target.value)}
+          placeholder="Zone (optional)"
+        />
+        <select
+          className="host-captain-select"
+          value={hostCaptainId}
+          onChange={event => setHostCaptainId(event.target.value)}
+        >
+          <option value="">Host captain unknown / shared account</option>
+          {captains.map(captain => (
+            <option key={captain.airtableRecordId} value={captain.airtableRecordId}>
+              Hosted by {captain.name}{captain.zone ? ` · ${captain.zone}` : ''}
+            </option>
+          ))}
+        </select>
+        <button
+          disabled={busy || !changed}
+          onClick={() => onSave(
+            meeting,
+            classification,
+            expectedZone,
+            hostCaptainId
+          )}
+        >
+          {busy ? 'Saving…' : 'Save classification'}
+        </button>
+        <button
+          className="expand-sessions-button"
+          onClick={() => setExpanded(value => !value)}
+        >
+          {expanded ? 'Hide dated sessions' : `Review ${meeting.sessions} dated sessions`}
+        </button>
+      </div>
+      {expanded && (
+        <div className="session-override-list">
+          <div className="session-override-explainer">
+            Session settings override the series default. Use this for personal rooms
+            or any series whose purpose changes by date.
+          </div>
+          {meeting.sessionItems.map(session => (
+            <SessionOverrideRow
+              key={session.sessionId}
+              session={session}
+              captains={captains}
+              busy={busyKey === `session:${session.sessionId}`}
+              onSave={onSaveOverride}
+            />
+          ))}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function ReviewWorkspace() {
+  const [data, setData] = useState(null);
+  const [tab, setTab] = useState('identities');
+  const [loading, setLoading] = useState(true);
+  const [busyKey, setBusyKey] = useState('');
+  const [error, setError] = useState('');
+  const [pendingRematchCount, setPendingRematchCount] = useState(0);
+
+  const loadReviewData = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const response = await fetch('/api/review-data');
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Review data could not be loaded.');
+      setData(body);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadReviewData();
+  }, [loadReviewData]);
+
+  const saveDecision = async (payload, key, { onSaved } = {}) => {
+    setBusyKey(key);
+    setError('');
+    try {
+      const response = await fetch('/api/review-decision', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Decision could not be saved.');
+      if (typeof onSaved === 'function') onSaved(body);
+      if (body.rematchPending) {
+        setPendingRematchCount(count => count + 1);
+      } else {
+        await loadReviewData();
+        window.dispatchEvent(new Event('engagement-data-updated'));
+      }
+      return body;
+    } catch (e) {
+      setError(e.message);
+      return null;
+    } finally {
+      setBusyKey('');
+    }
+  };
+
+  const decideIdentity = (item, status, captainRecordId = '') => saveDecision({
+    decisionType: 'identity',
+    identityType: item.identityType,
+    identityValue: item.identityValue,
+    status,
+    captainRecordId,
+  }, item.key, {
+    onSaved: () => {
+      setData(current => {
+        if (!current) return current;
+        const identities = current.identities.filter(entry => entry.key !== item.key);
+        return {
+          ...current,
+          identities,
+          summary: {
+            ...current.summary,
+            identitiesToReview: identities.length,
+          },
+        };
+      });
+    },
+  });
+
+  const saveMeeting = (
+    meeting,
+    classification,
+    expectedZone,
+    hostCaptainRecordId
+  ) => saveDecision({
+    decisionType: 'session',
+    topic: meeting.topic,
+    classification,
+    expectedZone,
+    hostCaptainRecordId,
+  }, meeting.topicKey, {
+    onSaved: () => {
+      setData(current => {
+        if (!current) return current;
+        return {
+          ...current,
+          meetings: current.meetings.map(entry => (
+            entry.topicKey === meeting.topicKey
+              ? {
+                ...entry,
+                classification,
+                expectedZone,
+                hostCaptainRecordId,
+              }
+              : entry
+          )),
+          summary: {
+            ...current.summary,
+            unclassifiedMeetings: current.meetings.filter(entry => {
+              const next = entry.topicKey === meeting.topicKey
+                ? classification
+                : entry.classification;
+              return next === 'unclassified';
+            }).length,
+          },
+        };
+      });
+    },
+  });
+
+  const saveSessionOverride = (
+    session,
+    classification,
+    expectedZone,
+    hostCaptainRecordId
+  ) => saveDecision({
+    decisionType: 'session_override',
+    sessionId: session.sessionId,
+    classification,
+    expectedZone,
+    hostCaptainRecordId,
+  }, `session:${session.sessionId}`, {
+    onSaved: () => {
+      setData(current => {
+        if (!current) return current;
+        return {
+          ...current,
+          meetings: current.meetings.map(meeting => ({
+            ...meeting,
+            sessionItems: meeting.sessionItems.map(item => (
+              item.sessionId === session.sessionId
+                ? {
+                  ...item,
+                  classification,
+                  expectedZone,
+                  hostCaptainRecordId,
+                  classificationSource: 'session_override',
+                }
+                : item
+            )),
+            mixedClassifications: new Set(
+              meeting.sessionItems.map(item => (
+                item.sessionId === session.sessionId ? classification : item.classification
+              ))
+            ).size > 1,
+          })),
+        };
+      });
+    },
+  });
+
+  const rematchAll = async () => {
+    setBusyKey('rematch-all');
+    setError('');
+    try {
+      const response = await fetch('/api/rematch-zoom', { method: 'POST' });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Rematch failed.');
+      setPendingRematchCount(0);
+      await loadReviewData();
+      window.dispatchEvent(new Event('engagement-data-updated'));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyKey('');
+    }
+  };
+
+  if (loading && !data) {
+    return <div className="review-loading">Preparing the identity review workspace…</div>;
+  }
+
+  return (
+    <section className="review-workspace">
+      <div className="review-workspace-heading">
+        <div>
+          <div className="section-kicker">Human-in-the-loop intelligence</div>
+          <h2>Review & Classification</h2>
+          <p>
+            Resolve Zoom identities quickly — decisions save immediately. When you are done
+            with a batch, rematch once to apply them across stored attendance history.
+          </p>
+        </div>
+        <button
+          className={pendingRematchCount > 0 ? 'rematch-button rematch-button-pending' : 'rematch-button'}
+          disabled={busyKey === 'rematch-all'}
+          onClick={rematchAll}
+        >
+          {busyKey === 'rematch-all'
+            ? 'Rematching…'
+            : pendingRematchCount > 0
+              ? `Rematch now (${pendingRematchCount} saved)`
+              : 'Rematch stored Zoom data'}
+        </button>
+      </div>
+
+      {error && <div className="captain-error">{error}</div>}
+      {pendingRematchCount > 0 && !error && (
+        <div className="rematch-pending-banner">
+          {pendingRematchCount} decision{pendingRematchCount === 1 ? '' : 's'} saved.
+          Keep reviewing, then click <strong>Rematch now</strong> once to update matches
+          and captain signals without hitting Google Sheets rate limits.
+        </div>
+      )}
+
+      {data && (
+        <>
+          <div className="review-summary-strip">
+            <div><strong>{data.identities.length}</strong><span>unique identities</span></div>
+            <div><strong>{data.summary.reviewOccurrences}</strong><span>review occurrences</span></div>
+            <div><strong>{data.summary.unclassifiedMeetings}</strong><span>meeting types unclassified</span></div>
+            <div><strong>{data.summary.matchedHosts}</strong><span>captain hosts matched</span></div>
+            <div><strong>{data.summary.onboardingProspects}</strong><span>onboarding prospects preserved</span></div>
+          </div>
+
+          <div className="review-tabs">
+            <button
+              className={tab === 'identities' ? 'active' : ''}
+              onClick={() => setTab('identities')}
+            >
+              People to identify <span>{data.identities.length}</span>
+            </button>
+            <button
+              className={tab === 'meetings' ? 'active' : ''}
+              onClick={() => setTab('meetings')}
+            >
+              Meeting types <span>{data.meetings.length}</span>
+            </button>
+          </div>
+
+          <div className="review-list">
+            {tab === 'identities' && data.identities.map(item => (
+              <IdentityReviewRow
+                key={item.key}
+                item={item}
+                captains={data.captains}
+                busy={busyKey === item.key}
+                onDecision={decideIdentity}
+              />
+            ))}
+            {tab === 'meetings' && data.meetings.map(meeting => (
+              <MeetingReviewRow
+                key={meeting.topicKey}
+                meeting={meeting}
+                captains={data.captains}
+                busy={busyKey === meeting.topicKey}
+                busyKey={busyKey}
+                onSave={saveMeeting}
+                onSaveOverride={saveSessionOverride}
+              />
+            ))}
+            {tab === 'identities' && data.onboardingProspects?.length > 0 && (
+              <div className="onboarding-prospects">
+                <h3>Prospective captains observed in onboarding</h3>
+                <p>
+                  These identities remain linked to their historical onboarding sessions
+                  and will rematch automatically if they later enter the Airtable roster.
+                </p>
+                {data.onboardingProspects.map(prospect => (
+                  <div key={prospect.key}>
+                    <strong>{prospect.name}</strong>
+                    <span>{prospect.email || 'No email'}</span>
+                    <span>{prospect.sessions} session{prospect.sessions !== 1 ? 's' : ''}</span>
+                    <span>{prospect.firstSeen}{prospect.lastSeen !== prospect.firstSeen ? ` – ${prospect.lastSeen}` : ''}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {tab === 'identities' && data.identities.length === 0 && (
+              <div className="review-empty">Every pending Zoom identity has been resolved.</div>
+            )}
+            {tab === 'meetings' && data.meetings.length === 0 && (
+              <div className="review-empty">No stored Zoom meetings are available yet.</div>
+            )}
+          </div>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -251,7 +1124,7 @@ function TrendsTab({ sessions, volunteers }) {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
 
         {/* Stars */}
-        {card('Most Consistent Volunteers', (
+        {card('Most Consistent Zoom Identities', (
           <>
             {insights?.stars.map((v, i) => (
               <div key={v.email || v.name} style={{
@@ -270,15 +1143,15 @@ function TrendsTab({ sessions, volunteers }) {
                 </div>
               </div>
             ))}
-            {!insights?.stars.length && <div style={{ color: '#2a3d4d', fontSize: 13 }}>No highly engaged volunteers yet.</div>}
+            {!insights?.stars.length && <div style={{ color: '#2a3d4d', fontSize: 13 }}>No highly frequent Zoom identities yet.</div>}
           </>
         ))}
 
         {/* Recently absent */}
-        {card('Slipping Away (Active → 60+ days absent)', (
+        {card('Previously Frequent, Now 60+ Days Absent', (
           <>
             {insights?.absent60.length === 0 && (
-              <div style={{ color: '#00c2a8', fontSize: 13 }}>No formerly-active volunteers missing — great sign.</div>
+              <div style={{ color: '#00c2a8', fontSize: 13 }}>No previously frequent identities are currently absent.</div>
             )}
             {insights?.absent60.map((v) => {
               const daysGone = Math.floor((new Date(today) - new Date(v.lastSeen)) / 86400000);
@@ -295,7 +1168,7 @@ function TrendsTab({ sessions, volunteers }) {
                     <div style={{ fontSize: 12, color: '#e05252', fontFamily: "'DM Mono', monospace" }}>
                       {daysGone}d ago
                     </div>
-                    <div style={{ fontSize: 11, color: '#556677' }}>was {v.tier === 'mid' ? 'Sporadic' : 'Active'}</div>
+                    <div style={{ fontSize: 11, color: '#556677' }}>was {v.tier === 'mid' ? 'Occasional' : 'Frequent'}</div>
                   </div>
                 </div>
               );
@@ -307,7 +1180,7 @@ function TrendsTab({ sessions, volunteers }) {
         {card('New Faces (last 60 days)', (
           <>
             {insights?.newFaces.length === 0 && (
-              <div style={{ color: '#2a3d4d', fontSize: 13 }}>No new volunteers in the last 60 days.</div>
+              <div style={{ color: '#2a3d4d', fontSize: 13 }}>No new Zoom identities in the last 60 days.</div>
             )}
             {insights?.newFaces.map((v) => (
               <div key={v.email || v.name} style={{
@@ -399,6 +1272,7 @@ export default function Home() {
       sessionCount: merged.length,
       dateRange: `${dates[0]} → ${dates[dates.length - 1]}`,
     });
+    return merged;
   };
 
   // ── Pull live API data ───────────────────────────────────────────────────────
@@ -414,21 +1288,27 @@ export default function Home() {
       const { token } = await getToken();
 
       setStatusMsg('Fetching user accounts…');
-      const userIds = await getAllUserIds(token);
+      const zoomUsers = await getAllUsers(token);
 
       const chunks = chunkDateRange(fromDate, toDate);
-      setStatusMsg(`Scanning ${chunks.length} month window(s) across ${userIds.length} user(s)…`);
+      setStatusMsg(`Scanning ${chunks.length} month window(s) across ${zoomUsers.length} user(s)…`);
 
       const seenUuids = new Set();
       let allMeetings = [];
-      for (const userId of userIds) {
+      for (const zoomUser of zoomUsers) {
         for (const chunk of chunks) {
-          const meetings = await fetchMeetingsInRange(token, userId, chunk.from, chunk.to, setStatusMsg);
+          const meetings = await fetchMeetingsInRange(
+            token,
+            zoomUser.id,
+            chunk.from,
+            chunk.to,
+            setStatusMsg
+          );
           for (const m of meetings) {
             const key = m.uuid || m.id;
             if (!seenUuids.has(key)) {
               seenUuids.add(key);
-              allMeetings.push(m);
+              allMeetings.push({ ...m, _hostUser: zoomUser });
             }
           }
         }
@@ -460,13 +1340,22 @@ export default function Home() {
           date: (m.start_time || '').slice(0, 10),
           duration: m.duration,
           participants,
+          hostId: m.host_id || m._hostUser?.id || '',
+          hostName: m.host_name
+            || m._hostUser?.display_name
+            || [m._hostUser?.first_name, m._hostUser?.last_name].filter(Boolean).join(' '),
+          hostEmail: m.host_email || m._hostUser?.email || '',
           source: 'api',
         });
         if (i < allMeetings.length - 1) await sleep(DELAY_MS);
       }
 
-      applyAndSave(enriched);
-      setStatusMsg('');
+      const merged = applyAndSave(enriched);
+      setStatusMsg('Matching captains and saving attendance to Google Sheets…');
+      const sheetResult = await storeZoomSessions(merged);
+      setStatusMsg(
+        `Saved ${sheetResult.attendanceRecords} attendance records; ${sheetResult.reviewsNeeded} need identity review.`
+      );
     } catch (e) {
       setError(e.message || 'Something went wrong.');
     } finally {
@@ -489,7 +1378,8 @@ export default function Home() {
         setError('No sessions parsed from the uploaded files. Check the file format.');
         return;
       }
-      applyAndSave(parsed);
+      const merged = applyAndSave(parsed);
+      await storeZoomSessions(merged);
       setCsvFiles([]);
     } catch (e) {
       setError(e.message || 'CSV import failed.');
@@ -571,7 +1461,7 @@ export default function Home() {
               Volunteer Engagement Analyzer
             </div>
             <div style={{ fontSize: 11, color: '#556677' }}>
-              Keep Altadena Together · Zoom Reports
+              Keep Altadena Together · Captain Intelligence
             </div>
           </div>
 
@@ -609,6 +1499,10 @@ export default function Home() {
 
         <div style={{ maxWidth: 1140, margin: '0 auto', padding: '32px 24px' }}>
 
+          <CaptainDirectory />
+
+          <ReviewWorkspace />
+
           {/* Setup Panel */}
           <div style={{
             background: '#0d1e2b', border: '1px solid #1a2e3a',
@@ -617,7 +1511,10 @@ export default function Home() {
 
             {/* Live API pull */}
             <div style={{ fontSize: 11, color: '#556677', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 20 }}>
-              Pull Live Data from Zoom
+              Zoom Ingestion & Raw Diagnostics
+              <span style={{ color: '#2f4654', textTransform: 'none', letterSpacing: 0, marginLeft: 8 }}>
+                — identity frequencies below are not official captain engagement ratings
+              </span>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr auto', gap: 16, alignItems: 'end' }}>
               <div>
@@ -754,10 +1651,10 @@ export default function Home() {
               {/* Stats */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12, marginBottom: 24 }}>
                 <StatCard label="Total Sessions" value={stats.totalSessions} accent="#0077b6" />
-                <StatCard label="Unique Volunteers" value={stats.totalUnique} accent="#00c2a8" />
-                <StatCard label="Avg Attendance" value={`${(stats.avgRate * 100).toFixed(0)}%`} accent="#f0b429" />
-                <StatCard label="Highly Engaged" value={stats.highCount} sub="≥75% attendance" accent="#00c2a8" />
-                <StatCard label="At Risk" value={stats.atRisk} sub="<40% attendance" accent="#e05252" />
+                <StatCard label="Zoom Identities" value={stats.totalUnique} accent="#00c2a8" />
+                <StatCard label="Avg Session Presence" value={`${(stats.avgRate * 100).toFixed(0)}%`} accent="#f0b429" />
+                <StatCard label="Frequent Identities" value={stats.highCount} sub="seen in ≥75% of sessions" accent="#00c2a8" />
+                <StatCard label="Infrequent Identities" value={stats.atRisk} sub="seen in <40% of sessions" accent="#e05252" />
                 <StatCard label="Unidentified" value={stats.unidCount} sub="phones / devices" accent="#334455" />
               </div>
 
@@ -773,7 +1670,7 @@ export default function Home() {
                     marginBottom: -1, transition: 'color 0.15s',
                   }}>
                     {t === 'sessions' ? `Sessions (${sessions.length})`
-                      : t === 'volunteers' ? `Volunteers (${volunteers.length})`
+                      : t === 'volunteers' ? `Zoom Identities (${volunteers.length})`
                       : 'Trends'}
                   </button>
                 ))}
@@ -812,9 +1709,9 @@ export default function Home() {
                     />
                     {[
                       { val: 'all', label: 'All tiers' },
-                      { val: 'high', label: 'Active' },
-                      { val: 'mid', label: 'Sporadic' },
-                      { val: 'low', label: 'At Risk' },
+                      { val: 'high', label: 'Frequent' },
+                      { val: 'mid', label: 'Occasional' },
+                      { val: 'low', label: 'Infrequent' },
                     ].map(({ val, label }) => (
                       <button key={val} onClick={() => setTierFilter(val)} style={{
                         background: tierFilter === val ? '#1a3a2a' : '#0a1520',
@@ -904,7 +1801,7 @@ export default function Home() {
 
                   {filteredVolunteers.length === 0 && (
                     <div style={{ padding: 40, textAlign: 'center', color: '#2a3d4d', fontSize: 13 }}>
-                      No volunteers match this filter.
+                      No Zoom identities match this filter.
                     </div>
                   )}
 
