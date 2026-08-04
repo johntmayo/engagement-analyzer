@@ -6,6 +6,7 @@ import {
 import { sheetsErrorMessage } from '../../lib/google-sheets';
 
 export const config = {
+  maxDuration: 300,
   api: {
     bodyParser: {
       sizeLimit: '10mb',

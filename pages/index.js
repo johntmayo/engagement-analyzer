@@ -108,6 +108,7 @@ function CaptainDirectory() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [syncingDashboard, setSyncingDashboard] = useState(false);
+  const [syncingGmail, setSyncingGmail] = useState(false);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [zone, setZone] = useState('all');
@@ -168,6 +169,22 @@ function CaptainDirectory() {
       setError(e.message);
     } finally {
       setSyncingDashboard(false);
+    }
+  };
+
+  const syncGmail = async () => {
+    setSyncingGmail(true);
+    setError('');
+    try {
+      const response = await fetch('/api/sync-gmail', { method: 'POST' });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Gmail sync failed.');
+      await loadRoster();
+      window.dispatchEvent(new Event('engagement-data-updated'));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSyncingGmail(false);
     }
   };
 
@@ -246,11 +263,28 @@ function CaptainDirectory() {
               Dashboard: {data.summary.dashboardMatched || 0} matched · {data.summary.dashboardReviews || 0} reviews
             </span>
           )}
-          <button onClick={syncRoster} disabled={syncing || syncingDashboard}>
+          {data?.latestGmailSync && (
+            <span>
+              Gmail: {data.summary.emailMatched || 0} matched events
+            </span>
+          )}
+          <button
+            onClick={syncRoster}
+            disabled={syncing || syncingDashboard || syncingGmail}
+          >
             {syncing ? 'Synchronizing…' : 'Sync Airtable'}
           </button>
-          <button onClick={syncDashboard} disabled={syncing || syncingDashboard}>
+          <button
+            onClick={syncDashboard}
+            disabled={syncing || syncingDashboard || syncingGmail}
+          >
             {syncingDashboard ? 'Syncing dashboard…' : 'Sync Dashboard Access'}
+          </button>
+          <button
+            onClick={syncGmail}
+            disabled={syncing || syncingDashboard || syncingGmail}
+          >
+            {syncingGmail ? 'Syncing Gmail…' : 'Sync Gmail'}
           </button>
         </div>
       </div>
@@ -360,8 +394,7 @@ function CaptainDirectory() {
                           ['Last observed Zoom activity', captain.signals?.find(signal => signal.key === 'last_zoom_activity')?.value || 'Not observed'],
                           ['Zoom activity trend', captain.signals?.find(signal => signal.key === 'zoom_trend')?.value || 'Not enough history'],
                           ['Last meeting hosted', captain.zoom?.lastHosted || 'Not observed'],
-                          ['Last Zone Dashboard access', captain.dashboard?.lastSeenAt || 'Not observed'],
-                          ['Dashboard logins recorded', captain.dashboard ? captain.dashboard.loginCount : 'Not observed'],
+                          ['Last dashboard use', captain.signals?.find(signal => signal.key === 'last_dashboard_access')?.value || 'Not observed'],
                           ['Mailbox interactions', captain.email
                             ? `${captain.email.total} (${captain.email.inbound} in / ${captain.email.outbound} out)`
                             : 'Not observed'],

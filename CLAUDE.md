@@ -29,7 +29,7 @@ solid.
 
 **Live URL:** https://engagement-analyzer.vercel.app  
 **GitHub:** https://github.com/johntmayo/engagement-analyzer  
-**Stack:** Next.js 14 (Pages Router) · Vercel Pro · Airtable (read-only roster) · Google Sheets (datastore) · Zoom S2S OAuth · Zone Dashboard User Access sheet · (partial) Gmail/mailbox events · (planned) WhatsApp
+**Stack:** Next.js 14 (Pages Router) · Vercel Pro · Airtable (read-only roster) · Google Sheets (datastore) · Zoom S2S OAuth · Zone Dashboard User Access sheet · Gmail API (read-only domain-wide delegation) · (planned) WhatsApp
 
 ---
 
@@ -42,7 +42,7 @@ solid.
 - **Zoom account:** info@altagether.org (Owner) + info+nczoom@altagether.org (Member — separate licensed user, both host sessions)
 - **Zoom plan:** Workplace Business (required for admin API scopes)
 - **Zone Dashboard** — Altagether captain-facing product; User Access spreadsheet tracks last login
-- **Org mailboxes** — Gmail/Google Workspace used for captain correspondence (exact inboxes TBD)
+- **Org mailboxes** — `info@`, `john@`, `newsletter@`, and `issues@altagether.org`
 
 ---
 
@@ -71,7 +71,7 @@ logging in, and meeting attendance are different kinds of evidence.
 | **Airtable People** | Canonical captain roster, zones, status, organizer-recorded interaction | ✅ Synced |
 | **Zoom** | Meeting attendance, hosting, classification-aware participation | ✅ Foundation live |
 | **Zone Dashboard User Access** | Last login / access activity from the User Access spreadsheet | ✅ Plumbing live (`POST /api/sync-dashboard-access`) |
-| **Gmail / mailbox** | Inbound/outbound captain correspondence; credit or ops emails as interaction events | 🔧 Sheets plumbing ready; live fetch needs mailbox + auth decisions |
+| **Gmail / mailbox** | Inbound captain correspondence across four Workspace inboxes | ✅ Live |
 | **WhatsApp** | Chat/group participation and outreach (later) | 📋 Planned later |
 | **Outbound digest (Resend)** | Weekly summary *to organizers* — not a captain signal source | 📋 Planned |
 
@@ -159,14 +159,10 @@ GOOGLE_SHEETS_SPREADSHEET_ID=
 GOOGLE_SERVICE_ACCOUNT_EMAIL=
 GOOGLE_PRIVATE_KEY=
 USER_ACCESS_SHEET_ID=
-# Optional until Gmail auth is decided:
-# GMAIL_MAILBOXES=
-# GMAIL_DIRECTIONS=inbound,outbound
-# GMAIL_AUTH_MODE=domain_wide|oauth
-# GMAIL_DELEGATED_USER=
-# GMAIL_OAUTH_CLIENT_ID=
-# GMAIL_OAUTH_CLIENT_SECRET=
-# GMAIL_OAUTH_REFRESH_TOKEN=
+GMAIL_MAILBOXES=info@altagether.org,john@altagether.org,newsletter@altagether.org,issues@altagether.org
+GMAIL_DIRECTIONS=inbound
+GMAIL_AUTH_MODE=domain_wide
+# GMAIL_LOOKBACK_DAYS=180
 ```
 
 **After changing env vars in Vercel, must redeploy for changes to take effect.**
@@ -238,7 +234,7 @@ Do **not** collapse into an opaque score. Each signal shows value, reason, and s
 - Community meetings hosted
 - Other meetings hosted
 - Last observed Zoom activity
-- Last Zone Dashboard access + login count
+- Days since last Zone Dashboard use (`login_count` retained only as audit data)
 - Mailbox interactions + last mailbox activity
 - Last organizer-recorded interaction (Airtable)
 - Zoom activity trend (recent 90 days vs prior 90 days)
@@ -298,7 +294,7 @@ Required Zoom scopes:
 | Rematch without Zoom API | ✅ |
 | Legacy Zoom explorer (raw frequencies) | ✅ exploratory only |
 | **Zone Dashboard User Access (last login) → captain events** | ✅ Plumbing live |
-| **Gmail / mailbox activity → captain events** | 🔧 Sheets + store API ready; live fetch blocked on auth/mailboxes |
+| **Gmail / mailbox activity → captain events** | ✅ Read-only four-mailbox fetch live |
 | Zoom host-credit + attendance-denominator hardening | 🔧 Denominator hardened; host-credit workflow continues |
 | Deeper Zoom history in Sheets | 🔧 Needs fuller pull / CSV |
 | Scheduled auto-pulls / cron | 📋 Planned |
@@ -311,11 +307,10 @@ Required Zoom scopes:
 
 ### Immediate integration priorities
 
-1. Point `USER_ACCESS_SHEET_ID` at the live User Access Registry and share Viewer with Analyzer SA
-2. Finish Gmail live fetch (mailbox list, directions, credits-assigned meaning, auth mode)
-3. Finish Zoom host-credit UX for shared Altagether Org / Altagether NCs accounts
-4. Unified timeline across sources; WhatsApp after email/dashboard are trusted
-5. Keep this multi-source north star current (this file + README)
+1. Verify the completed Gmail fetch against Vercel
+2. Finish Zoom host-credit UX for shared Altagether Org / Altagether NCs accounts
+3. Unified timeline across sources; WhatsApp after email/dashboard are trusted
+4. Keep this multi-source north star current (this file + README)
 
 ---
 
@@ -374,4 +369,4 @@ Deploy: `git push origin main` → Vercel auto-deploys.
 | Scopes not saving in Zoom UI | Pro plan limitation — needs Business/Enterprise for `:admin` scopes. |
 | Dashboard sync: no source configured | Set `USER_ACCESS_SHEET_ID` or paste Access rows into `Dashboard Access Source`. |
 | Dashboard sync: permission denied | Share User Access Registry with Analyzer SA as Viewer. |
-| Gmail sync 501 | Expected until mailbox list + auth mode are configured; use `{events:[…]}` to store. |
+| Gmail quota error | Sync retries transient limits and bounds each mailbox to 200 recent messages per run. |

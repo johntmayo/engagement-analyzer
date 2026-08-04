@@ -21,7 +21,7 @@ identity links) + a multi-source activity timeline:
 | Airtable People | Who is a captain | ✅ Live |
 | Zoom | Meetings attended / hosted | ✅ Foundation live |
 | Zone Dashboard User Access | Last login / dashboard activity | ✅ Plumbing live |
-| Gmail / mailbox | Captain correspondence as engagement | 🔧 Sheets plumbing ready; live fetch needs auth |
+| Gmail / mailbox | Inbound captain correspondence across four Workspace inboxes | ✅ Live |
 | WhatsApp | Chat / outreach activity | 📋 Later |
 | Resend digest | Weekly summary *to organizers* | 📋 Planned |
 
@@ -36,14 +36,13 @@ See [CLAUDE.md](./CLAUDE.md) for the full multi-source model and signal principl
 - Supports historical Zoom CSV import beyond the 6-month API limit
 - Human-reviewed identity linking (never auto-merges people)
 - Meeting series defaults + per-session classification overrides
-- Syncs Zone Dashboard User Access (`last_seen_at` / `login_count`) into captain signals
-- Stores normalized mailbox events in Sheets (`Email Events`) and surfaces them on profiles once loaded
+- Syncs Zone Dashboard `last_seen_at` into a **days since last use** captain signal (`login_count` remains audit-only)
+- Pulls read-only inbound Gmail metadata from four Workspace inboxes, stores normalized `Email Events`, and surfaces matched activity on captain profiles
 - Captain profiles with transparent multi-source signals — each with reason and source
 - Legacy Zoom explorer for raw attendance frequencies (not official ratings)
 
 ## Not Built Yet (but on the roadmap)
 
-- Live Gmail API fetch (mailbox list + auth mode still needed)
 - WhatsApp events
 - Unified multi-source timeline UI
 - Scheduled sync, AI briefings, organizer email digest
@@ -189,14 +188,23 @@ different service account (`dashboard@…`); both may need access to the same sh
 
 ### Gmail / mailbox
 
-Sheets plumbing is ready (`Email Events` tab).
+`POST /api/sync-gmail` uses Workspace domain-wide delegation with the
+`gmail.readonly` scope to read inbound message metadata from:
 
-- `GET /api/sync-gmail` — configuration status / missing env vars
-- `POST /api/sync-gmail` with `{ "events": [...] }` — store normalized events now
-- Live mailbox fetch waits on organizer answers: mailbox(es), inbound/outbound/both,
-  what “credits assigned” means, and auth (`domain_wide` vs user OAuth)
+- `info@altagether.org`
+- `john@altagether.org`
+- `newsletter@altagether.org`
+- `issues@altagether.org`
 
-This is captain correspondence evidence — not the planned Resend organizer digest.
+The fetch stores mailbox, sender/recipient addresses, timestamp, message/thread
+IDs, and labels. It intentionally does **not** store message bodies or subjects.
+Only email matches supported by captain roster emails or confirmed identity links
+attach to captain profiles; unmatched senders remain unmatched.
+
+The initial run looks back up to 180 days and processes a bounded recent batch
+per mailbox to respect Gmail API quota. Later runs overlap the latest two days
+and upsert by mailbox + message ID. This is transparent correspondence evidence,
+not a point score and not the planned Resend organizer digest.
 
 ### Organizer workflow
 

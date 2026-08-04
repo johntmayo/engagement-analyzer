@@ -62,6 +62,15 @@ function isEligibleCaptainSession(session) {
     && Boolean(normalizeZoneToken(session.expected_zone));
 }
 
+function dashboardRecency(lastSeenAt, now = Date.now()) {
+  const timestamp = Date.parse(lastSeenAt || '');
+  if (!Number.isFinite(timestamp)) return 'Not observed';
+  const days = Math.max(0, Math.floor((now - timestamp) / 86400000));
+  if (days === 0) return 'Today';
+  if (days === 1) return '1 day ago';
+  return `${days} days ago`;
+}
+
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
 
@@ -284,24 +293,12 @@ export default async function handler(req, res) {
         ),
         signal(
           'last_dashboard_access',
-          'Last Zone Dashboard access',
-          dashboard?.last_seen_at || 'Not observed',
+          'Last dashboard use',
+          dashboardRecency(dashboard?.last_seen_at, now),
           dashboard
-            ? `Matched dashboard login ${dashboard.login_email}`
-              + (dashboard.login_count
-                ? ` with ${dashboard.login_count} recorded login(s).`
-                : '.')
-              + ' Absence here never counts against a captain.'
+            ? `Last seen ${dashboard.last_seen_at} for matched dashboard login `
+              + `${dashboard.login_email}. Absence here never counts against a captain.`
             : 'No matched Zone Dashboard User Access row for this captain yet.',
-          'Zone Dashboard User Access'
-        ),
-        signal(
-          'dashboard_login_count',
-          'Dashboard logins recorded',
-          dashboard ? Number(dashboard.login_count) || 0 : 'Not observed',
-          dashboard
-            ? 'login_count from the Zone Dashboard User Access sheet for the matched login email.'
-            : 'No matched dashboard access row yet.',
           'Zone Dashboard User Access'
         ),
         signal(
