@@ -395,10 +395,10 @@ function CaptainDirectory() {
                           ['Zoom activity trend', captain.signals?.find(signal => signal.key === 'zoom_trend')?.value || 'Not enough history'],
                           ['Last meeting hosted', captain.zoom?.lastHosted || 'Not observed'],
                           ['Last dashboard use', captain.signals?.find(signal => signal.key === 'last_dashboard_access')?.value || 'Not observed'],
-                          ['Mailbox interactions', captain.email
-                            ? `${captain.email.total} (${captain.email.inbound} in / ${captain.email.outbound} out)`
+                          ['Mailbox interactions', captain.mailbox
+                            ? `${captain.mailbox.total} (${captain.mailbox.inbound} in / ${captain.mailbox.outbound} out)`
                             : 'Not observed'],
-                          ['Last mailbox activity', captain.email?.lastAt || 'Not observed'],
+                          ['Last mailbox activity', captain.mailbox?.lastAt || 'Not observed'],
                           ['Last updated by', captain.last_updated_by || 'Not recorded'],
                           ['Shirt status', captain.shirt_status || 'Not recorded'],
                           ['Special opportunity', captain.special_opportunity || 'None'],

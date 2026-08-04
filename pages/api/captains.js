@@ -366,7 +366,7 @@ export default async function handler(req, res) {
             matchMethod: dashboard.match_method || '',
           }
           : null,
-        email: email
+        mailbox: email
           ? {
             total: email.total,
             inbound: email.inbound,
