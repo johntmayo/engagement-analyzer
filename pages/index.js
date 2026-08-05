@@ -103,6 +103,219 @@ function SessionRow({ session, index }) {
   );
 }
 
+const RISK_LABELS = {
+  at_risk: 'At risk',
+  needs_attention: 'Needs attention',
+  recently_active: 'Recently active',
+};
+
+const TREND_LABELS = {
+  increasing: '↑ Increasing',
+  steady: '→ Steady',
+  decreasing: '↓ Decreasing',
+  no_recent_activity: '— No recent activity',
+};
+
+function formatActivityDate(value) {
+  if (!value) return 'No observed activity';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+function relativeActivityDate(value) {
+  const timestamp = Date.parse(value || '');
+  if (!Number.isFinite(timestamp)) return 'Not observed';
+  const days = Math.max(0, Math.floor((Date.now() - timestamp) / 86400000));
+  if (days === 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days < 14) return `${days} days ago`;
+  if (days < 56) return `${Math.floor(days / 7)} weeks ago`;
+  if (days < 730) {
+    const months = Math.max(1, Math.round(days / 30));
+    return `${months} month${months === 1 ? '' : 's'} ago`;
+  }
+  const years = Math.floor(days / 365);
+  return `${years} year${years === 1 ? '' : 's'} ago`;
+}
+
+function KeyEngagementMarkers({ captain }) {
+  const markers = [
+    {
+      key: 'dashboard',
+      source: 'Dashboard',
+      label: 'Last dashboard login',
+      value: captain.dashboard?.lastSeenAt,
+      detail: captain.dashboard?.loginEmail
+        ? `Login: ${captain.dashboard.loginEmail}`
+        : 'No matched Dashboard account activity',
+    },
+    {
+      key: 'zoom',
+      source: 'Zoom',
+      label: 'Last meeting attended',
+      value: captain.zoom?.lastSeen,
+      detail: captain.zoom?.lastSeen
+        ? 'Most recent matched Zoom attendance'
+        : 'No matched meeting attendance',
+    },
+    {
+      key: 'gmail',
+      source: 'Gmail',
+      label: 'Last email sent to us',
+      value: captain.mailbox?.lastInboundAt,
+      detail: captain.mailbox?.lastInboundAt
+        ? `From ${captain.mailbox.lastInboundSender} to ${captain.mailbox.lastInboundMailbox}`
+        : 'No matched inbound email',
+    },
+    {
+      key: 'airtable',
+      source: 'Airtable',
+      label: 'Last organizer interaction',
+      value: captain.last_organizer_recorded_interaction,
+      detail: captain.last_organizer_recorded_interaction
+        ? 'Organizer-maintained interaction date'
+        : 'No organizer interaction recorded',
+    },
+  ];
+
+  return (
+    <section className="key-engagement-markers">
+      <header>
+        <div>
+          <span>Key engagement markers</span>
+          <h3>Most recent contact and participation</h3>
+        </div>
+        <p>Missing activity in one channel is not a negative signal.</p>
+      </header>
+      <div className="marker-grid">
+        {markers.map((marker) => (
+          <article
+            className={`engagement-marker ${marker.key}${marker.value ? '' : ' empty'}`}
+            key={marker.key}
+          >
+            <div className="marker-source">
+              <i />
+              {marker.source}
+            </div>
+            <h4>{marker.label}</h4>
+            <strong>{relativeActivityDate(marker.value)}</strong>
+            <time dateTime={marker.value || undefined}>
+              {marker.value ? formatActivityDate(marker.value) : 'No activity observed'}
+            </time>
+            <small>{marker.detail}</small>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function scoreWeekSlots(engagement) {
+  const byWeek = new Map(
+    (engagement?.weeks || []).map((week) => [week.weekStart, week])
+  );
+  const now = new Date();
+  const day = now.getUTCDay();
+  const daysSinceMonday = day === 0 ? 6 : day - 1;
+  now.setUTCHours(0, 0, 0, 0);
+  now.setUTCDate(now.getUTCDate() - daysSinceMonday);
+  return Array.from({ length: 12 }, (_, index) => {
+    const date = new Date(now);
+    date.setUTCDate(date.getUTCDate() - (11 - index) * 7);
+    const key = date.toISOString().slice(0, 10);
+    return byWeek.get(key) || {
+      weekStart: key,
+      points: 0,
+      eventCount: 0,
+      sources: [],
+    };
+  });
+}
+
+function EngagementScorePanel({ engagement }) {
+  if (!engagement) return null;
+  const slots = scoreWeekSlots(engagement);
+  return (
+    <section className="engagement-score-panel">
+      <div className="score-panel-heading">
+        <div>
+          <span className="score-kicker">Rolling 12-week signal</span>
+          <div className="score-number-line">
+            <strong>{engagement.points}</strong>
+            <span>engagement points</span>
+          </div>
+          <p>
+            {engagement.activeWeeks} active week{engagement.activeWeeks === 1 ? '' : 's'}
+            {engagement.leadershipWeeks
+              ? ` · ${engagement.leadershipWeeks} leadership week${engagement.leadershipWeeks === 1 ? '' : 's'}`
+              : ''}
+          </p>
+        </div>
+        <div className="score-status-stack">
+          <span className={`engagement-risk ${engagement.risk}`}>
+            {RISK_LABELS[engagement.risk] || engagement.risk}
+          </span>
+          <span className={`engagement-trend ${engagement.trend.direction}`}>
+            {TREND_LABELS[engagement.trend.direction] || engagement.trend.direction}
+          </span>
+        </div>
+      </div>
+
+      <div className="score-week-strip" aria-label="Activity during the last 12 weeks">
+        {slots.map((week, index) => (
+          <div
+            className={`score-week points-${week.points}`}
+            key={week.weekStart}
+            title={`${formatActivityDate(week.weekStart)}: ${week.points} point${week.points === 1 ? '' : 's'}, ${week.eventCount} event${week.eventCount === 1 ? '' : 's'}`}
+          >
+            <span>{index === 11 ? 'Now' : index === 0 ? '12w' : ''}</span>
+            <i />
+          </div>
+        ))}
+      </div>
+
+      <details className="score-ledger">
+        <summary>Why {engagement.points} point{engagement.points === 1 ? '' : 's'}?</summary>
+        {engagement.weeks.length ? engagement.weeks.map((week) => (
+          <article className="score-ledger-week" key={week.weekStart}>
+            <header>
+              <div>
+                <strong>Week of {formatActivityDate(week.weekStart)}</strong>
+                <span>{week.sources.join(' + ')}</span>
+              </div>
+              <b>{week.points} pt{week.points === 1 ? '' : 's'}</b>
+            </header>
+            <div className="score-event-list">
+              {week.events.map((event, index) => (
+                <div className="score-event" key={`${event.occurredAt}-${event.kind}-${index}`}>
+                  <span className={`score-source ${event.source}`}>{event.source}</span>
+                  <div>
+                    <strong>{event.label}</strong>
+                    {event.detail && <span>{event.detail}</span>}
+                    <small>{event.reason}</small>
+                  </div>
+                </div>
+              ))}
+              {week.hiddenEventCount > 0 && (
+                <small className="score-hidden-events">
+                  +{week.hiddenEventCount} more event{week.hiddenEventCount === 1 ? '' : 's'} that week
+                </small>
+              )}
+            </div>
+          </article>
+        )) : (
+          <p className="score-empty">No verified activity in the current 12-week window.</p>
+        )}
+      </details>
+    </section>
+  );
+}
+
 function CaptainDirectory() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -112,6 +325,8 @@ function CaptainDirectory() {
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [zone, setZone] = useState('all');
+  const [riskFilter, setRiskFilter] = useState('all');
+  const [sortBy, setSortBy] = useState('risk');
   const [reviewOnly, setReviewOnly] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
 
@@ -211,6 +426,7 @@ function CaptainDirectory() {
 
   const filteredCaptains = useMemo(() => {
     const term = search.trim().toLowerCase();
+    const riskOrder = { at_risk: 0, needs_attention: 1, recently_active: 2 };
     return (data?.captains || []).filter(captain => {
       const matchesSearch = !term || [
         captain.full_name,
@@ -222,10 +438,43 @@ function CaptainDirectory() {
       ].some(value => String(value || '').toLowerCase().includes(term));
       const matchesZone = zone === 'all' || String(captain.zones || '')
         .split('|').map(value => value.trim()).includes(zone);
+      const matchesRisk = riskFilter === 'all'
+        || captain.engagement?.risk === riskFilter;
       const matchesReview = !reviewOnly || issuesByCaptain.has(captain.airtable_record_id);
-      return matchesSearch && matchesZone && matchesReview;
+      return matchesSearch && matchesZone && matchesRisk && matchesReview;
+    }).sort((a, b) => {
+      if (sortBy === 'points') {
+        return (b.engagement?.points || 0) - (a.engagement?.points || 0)
+          || String(a.full_name).localeCompare(String(b.full_name));
+      }
+      if (sortBy === 'trend') {
+        const trendOrder = {
+          decreasing: 0,
+          no_recent_activity: 1,
+          steady: 2,
+          increasing: 3,
+        };
+        return (trendOrder[a.engagement?.trend?.direction] ?? 4)
+          - (trendOrder[b.engagement?.trend?.direction] ?? 4)
+          || String(a.full_name).localeCompare(String(b.full_name));
+      }
+      if (sortBy === 'name') {
+        return String(a.full_name).localeCompare(String(b.full_name));
+      }
+      return (riskOrder[a.engagement?.risk] ?? 3)
+        - (riskOrder[b.engagement?.risk] ?? 3)
+        || (a.engagement?.points || 0) - (b.engagement?.points || 0)
+        || String(a.full_name).localeCompare(String(b.full_name));
     });
-  }, [data, issuesByCaptain, reviewOnly, search, zone]);
+  }, [
+    data,
+    issuesByCaptain,
+    reviewOnly,
+    riskFilter,
+    search,
+    sortBy,
+    zone,
+  ]);
 
   const latestSync = data?.latestSync?.synced_at
     ? new Date(data.latestSync.synced_at).toLocaleString()
@@ -295,15 +544,35 @@ function CaptainDirectory() {
         <>
           <div className="roster-stats">
             <StatCard label="Current Captains" value={data.summary.captains} accent="#00c2a8" />
-            <StatCard label="Zones Represented" value={data.summary.zones} accent="#4d8cc9" />
-            <StatCard label="Zoom Sessions" value={data.summary.zoomSessions} accent="#4d8cc9" />
-            <StatCard label="Matched Attendance" value={data.summary.matchedZoomAttendances} accent="#00c2a8" />
-            <StatCard label="Dashboard Matched" value={data.summary.dashboardMatched || 0} accent="#4d8cc9" />
-            <StatCard label="Mailbox Events" value={data.summary.emailEvents || 0} accent="#00c2a8" />
             <StatCard
-              label="Roster Review Flags"
-              value={data.summary.missingResidentIds + data.summary.reviewFlags}
+              label="At Risk"
+              value={data.summary.atRisk || 0}
+              sub="No active weeks in the last 8"
+              accent="#e05252"
+            />
+            <StatCard
+              label="Needs Attention"
+              value={data.summary.needsAttention || 0}
+              sub="One active week in the last 8"
               accent="#f0b429"
+            />
+            <StatCard
+              label="Recently Active"
+              value={data.summary.recentlyActive || 0}
+              sub="Two or more active weeks"
+              accent="#00c2a8"
+            />
+            <StatCard
+              label="Trending Down"
+              value={data.summary.trendingDown || 0}
+              sub="Latest 4 weeks vs prior 4"
+              accent="#d17856"
+            />
+            <StatCard
+              label="Average Points"
+              value={(data.summary.engagementPoints / Math.max(data.summary.captains, 1)).toFixed(1)}
+              sub="Rolling 12-week window"
+              accent="#4d8cc9"
             />
           </div>
 
@@ -318,6 +587,21 @@ function CaptainDirectory() {
               <select value={zone} onChange={event => setZone(event.target.value)}>
                 <option value="all">Every zone</option>
                 {zones.map(value => <option key={value} value={value}>{value}</option>)}
+              </select>
+              <select
+                value={riskFilter}
+                onChange={event => setRiskFilter(event.target.value)}
+              >
+                <option value="all">Every engagement status</option>
+                <option value="at_risk">At risk</option>
+                <option value="needs_attention">Needs attention</option>
+                <option value="recently_active">Recently active</option>
+              </select>
+              <select value={sortBy} onChange={event => setSortBy(event.target.value)}>
+                <option value="risk">Sort: highest risk</option>
+                <option value="points">Sort: most points</option>
+                <option value="trend">Sort: declining first</option>
+                <option value="name">Sort: name</option>
               </select>
               <button
                 className={reviewOnly ? 'review-toggle active' : 'review-toggle'}
@@ -334,8 +618,10 @@ function CaptainDirectory() {
             <div className="captain-table-header">
               <span>Captain</span>
               <span>Zone</span>
-              <span>Engagement status</span>
-              <span>Last organizer note</span>
+              <span>Points</span>
+              <span>Status</span>
+              <span>Trend</span>
+              <span>Last activity</span>
               <span>Data health</span>
             </div>
 
@@ -358,9 +644,20 @@ function CaptainDirectory() {
                       <small>{captain.email || captain.dashboard_gmail || 'No email recorded'}</small>
                     </span>
                     <span>{captain.zones || 'Unassigned'}</span>
-                    <span>{captain.engagement_status || 'Not marked'}</span>
+                    <span className="score-cell">
+                      <strong>{captain.engagement?.points || 0}</strong>
+                      <small>{captain.engagement?.activeWeeks || 0} active weeks</small>
+                    </span>
+                    <span>
+                      <span className={`engagement-risk ${captain.engagement?.risk || 'at_risk'}`}>
+                        {RISK_LABELS[captain.engagement?.risk] || 'At risk'}
+                      </span>
+                    </span>
+                    <span className={`engagement-trend ${captain.engagement?.trend?.direction || 'no_recent_activity'}`}>
+                      {TREND_LABELS[captain.engagement?.trend?.direction] || '— No recent activity'}
+                    </span>
                     <span className="mono-cell">
-                      {captain.last_organizer_recorded_interaction || 'No date'}
+                      {formatActivityDate(captain.engagement?.lastActivityAt)}
                     </span>
                     <span>
                       {captainIssues.length
@@ -371,7 +668,13 @@ function CaptainDirectory() {
 
                   {expanded && (
                     <div className="captain-record-detail">
+                      <KeyEngagementMarkers captain={captain} />
+                      <EngagementScorePanel engagement={captain.engagement} />
                       <div className="captain-facts">
+                        <h4 className="supporting-details-title">
+                          Supporting details
+                          <small>Identity, logistics, and secondary activity context</small>
+                        </h4>
                         {[
                           ['Resident ID', captain.resident_id || 'Missing'],
                           ['Address', captain.address || 'Not recorded'],
@@ -391,14 +694,10 @@ function CaptainDirectory() {
                           ['Onboarding milestone', captain.zoom?.onboardingMilestone || 'Not observed'],
                           ['Community meetings hosted', captain.zoom?.communitySessionsHosted || 'None yet'],
                           ['Other meetings hosted', captain.zoom?.otherSessionsHosted || 'None yet'],
-                          ['Last observed Zoom activity', captain.signals?.find(signal => signal.key === 'last_zoom_activity')?.value || 'Not observed'],
-                          ['Zoom activity trend', captain.signals?.find(signal => signal.key === 'zoom_trend')?.value || 'Not enough history'],
                           ['Last meeting hosted', captain.zoom?.lastHosted || 'Not observed'],
-                          ['Last dashboard use', captain.signals?.find(signal => signal.key === 'last_dashboard_access')?.value || 'Not observed'],
                           ['Mailbox interactions', captain.mailbox
                             ? `${captain.mailbox.total} (${captain.mailbox.inbound} in / ${captain.mailbox.outbound} out)`
                             : 'Not observed'],
-                          ['Last mailbox activity', captain.mailbox?.lastAt || 'Not observed'],
                           ['Last updated by', captain.last_updated_by || 'Not recorded'],
                           ['Shirt status', captain.shirt_status || 'Not recorded'],
                           ['Special opportunity', captain.special_opportunity || 'None'],

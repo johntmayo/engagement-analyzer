@@ -24,8 +24,8 @@ are required parts of the product direction — not optional extras.
 
 Organizers review ambiguous identities and classify meetings. The app derives
 transparent engagement signals with an explicit reason and source for each.
-Do **not** collapse signals into an opaque score until multi-source evidence is
-solid.
+The versioned active-week indicator may summarize those events, but it must
+remain replaceable and expose every contributing week, source, and reason.
 
 **Live URL:** https://engagement-analyzer.vercel.app  
 **GitHub:** https://github.com/johntmayo/engagement-analyzer  
@@ -96,7 +96,8 @@ Normalized events stored in Sheets and rolled into captain signals, e.g.:
 
 ### Signal principles
 
-- Transparent source-specific signals first; no opaque composite score yet
+- Transparent source-specific signals remain primary
+- Any rollup must be versioned, replaceable, and traceable to its event evidence
 - Absence in an optional channel must not count against a captain
 - Hosting and initiated outreach are strong positive leadership signals
 - Unmatched people stay in review or channel-specific buckets (guest, prospective);
@@ -124,6 +125,7 @@ engagement-analyzer/
 │       └── zoom-proxy.js
 ├── lib/
 │   ├── airtable.js              # Roster normalization + quality checks
+│   ├── engagement-score.js      # Versioned rolling-week points, risk, and trends
 │   ├── google-sheets.js         # Workbook schemas / access
 │   ├── identity.js              # Matching + manual identity decisions
 │   ├── zoom-matching.js         # Classifications, guests, hosts, rematch core
@@ -162,7 +164,7 @@ USER_ACCESS_SHEET_ID=
 GMAIL_MAILBOXES=info@altagether.org,john@altagether.org,newsletter@altagether.org,issues@altagether.org
 GMAIL_DIRECTIONS=inbound
 GMAIL_AUTH_MODE=domain_wide
-# GMAIL_LOOKBACK_DAYS=180
+# GMAIL_LOOKBACK_DAYS=84
 ```
 
 **After changing env vars in Vercel, must redeploy for changes to take effect.**
@@ -188,6 +190,7 @@ Share the Zone Dashboard User Access Registry with the Analyzer service account
 | Dashboard Access | Matched Zone Dashboard login / last_seen / login_count |
 | Dashboard Match Review | Unmatched / ambiguous dashboard logins |
 | Email Events | Normalized inbound/outbound mailbox events |
+| Gmail Sync State | Per-mailbox 12-week backfill cursor and completion state |
 | Data Quality | Missing resident IDs, duplicate identifiers, etc. |
 | Sync Log | Airtable, Zoom, dashboard, gmail, and rematch runs |
 
@@ -224,7 +227,7 @@ Shared Zoom hosts (`Altagether Org` / `Altagether NCs`) require manual captain-h
 
 ## Engagement Signals (Captain Profiles)
 
-Do **not** collapse into an opaque score. Each signal shows value, reason, and source:
+Each source signal continues to show its value, reason, and source:
 
 - Captain meetings attended
 - Eligible captain-meeting attendance rate (zone-aware denominator; expected_zone required)
@@ -238,6 +241,21 @@ Do **not** collapse into an opaque score. Each signal shows value, reason, and s
 - Mailbox interactions + last mailbox activity
 - Last organizer-recorded interaction (Airtable)
 - Zoom activity trend (recent 90 days vs prior 90 days)
+
+### Versioned rolling engagement indicator (`engagement_v1`)
+
+- Window: current UTC week plus the previous 11 weeks
+- Routine activity: 1 point for an active week, regardless of event count
+- Leadership activity: 2 points total for a week with credited captain hosting
+- At risk: 0 active weeks in the latest 8 weeks
+- Needs attention: 1 active week in the latest 8 weeks
+- Recently active: 2+ active weeks in the latest 8 weeks
+- Trend: latest 4 weeks of points compared with the preceding 4 weeks
+- Evidence: per-week Zoom, Gmail, Dashboard, and Airtable events; Gmail evidence
+  includes both organizational inbox and captain sender address
+
+This indicator is intentionally replaceable. It does not assign channel-specific
+absence penalties, and every point must remain auditable in the captain profile.
 
 Hosting is treated as a particularly strong positive signal.
 Captain-meeting attendance rates exclude sessions with a blank `expected_zone`
@@ -295,11 +313,12 @@ Required Zoom scopes:
 | Legacy Zoom explorer (raw frequencies) | ✅ exploratory only |
 | **Zone Dashboard User Access (last login) → captain events** | ✅ Plumbing live |
 | **Gmail / mailbox activity → captain events** | ✅ Read-only four-mailbox fetch live |
+| **Rolling points, risk, trends, and evidence ledger** | ✅ `engagement_v1` live locally |
 | Zoom host-credit + attendance-denominator hardening | 🔧 Denominator hardened; host-credit workflow continues |
 | Deeper Zoom history in Sheets | 🔧 Needs fuller pull / CSV |
 | Scheduled auto-pulls / cron | 📋 Planned |
 | WhatsApp activity → captain events | 📋 Planned later |
-| Unified multi-source captain timeline UI | 📋 Planned (needs Gmail + Dashboard first) |
+| Unified multi-source captain timeline UI | ✅ Rolling weekly evidence ledger live |
 | AI engagement briefings | 📋 Planned |
 | Weekly organizer email digest (Resend) | 📋 Planned |
 | Trend charts | 📋 Planned |
@@ -307,10 +326,10 @@ Required Zoom scopes:
 
 ### Immediate integration priorities
 
-1. Verify the completed Gmail fetch against Vercel
+1. Deploy and verify `engagement_v1` against Vercel
 2. Finish Zoom host-credit UX for shared Altagether Org / Altagether NCs accounts
-3. Unified timeline across sources; WhatsApp after email/dashboard are trusted
-4. Keep this multi-source north star current (this file + README)
+3. Add WhatsApp only after email/dashboard signals are trusted
+4. Keep the transparent scoring rules current (this file + README)
 
 ---
 
@@ -369,4 +388,4 @@ Deploy: `git push origin main` → Vercel auto-deploys.
 | Scopes not saving in Zoom UI | Pro plan limitation — needs Business/Enterprise for `:admin` scopes. |
 | Dashboard sync: no source configured | Set `USER_ACCESS_SHEET_ID` or paste Access rows into `Dashboard Access Source`. |
 | Dashboard sync: permission denied | Share User Access Registry with Analyzer SA as Viewer. |
-| Gmail quota error | Sync retries transient limits and bounds each mailbox to 200 recent messages per run. |
+| Gmail quota error | Sync retries transient limits, refreshes at most 100 recent messages, and backfills at most 400 older messages per mailbox per run. |

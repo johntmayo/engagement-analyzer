@@ -39,6 +39,7 @@ See [CLAUDE.md](./CLAUDE.md) for the full multi-source model and signal principl
 - Syncs Zone Dashboard `last_seen_at` into a **days since last use** captain signal (`login_count` remains audit-only)
 - Pulls read-only inbound Gmail metadata from four Workspace inboxes, stores normalized `Email Events`, and surfaces matched activity on captain profiles
 - Captain profiles with transparent multi-source signals — each with reason and source
+- Versioned rolling 12-week engagement points, risk labels, trends, and a per-week evidence ledger
 - Legacy Zoom explorer for raw attendance frequencies (not official ratings)
 
 ## Not Built Yet (but on the roadmap)
@@ -117,6 +118,7 @@ Google Sheets tabs:
 - `Dashboard Access`
 - `Dashboard Match Review`
 - `Email Events`
+- `Gmail Sync State`
 - `Data Quality`
 - `Sync Log`
 
@@ -201,10 +203,28 @@ IDs, and labels. It intentionally does **not** store message bodies or subjects.
 Only email matches supported by captain roster emails or confirmed identity links
 attach to captain profiles; unmatched senders remain unmatched.
 
-The initial run looks back up to 180 days and processes a bounded recent batch
-per mailbox to respect Gmail API quota. Later runs overlap the latest two days
-and upsert by mailbox + message ID. This is transparent correspondence evidence,
-not a point score and not the planned Resend organizer digest.
+The default lookback is 84 days (12 weeks). Sync first protects recent mail, then
+walks backward in bounded batches and saves a per-mailbox completion cursor in
+`Gmail Sync State`. Repeated syncs safely finish a busy inbox without restarting
+the backfill; completed inboxes only refresh recent mail. Events upsert by
+mailbox + message ID.
+
+### Rolling engagement indicator
+
+The directory derives `engagement_v1` from verified Zoom, Gmail, Dashboard, and
+Airtable events:
+
+- An active week is worth **1 point**, regardless of how many routine events occurred.
+- A week with credited captain hosting is worth **2 points total**.
+- The rolling window is the current week plus the previous 11 weeks.
+- **At risk** means 0 active weeks in the latest 8 weeks.
+- **Needs attention** means 1 active week in the latest 8 weeks.
+- **Recently active** means 2 or more active weeks in the latest 8 weeks.
+- Trend compares points in the latest 4 weeks with the preceding 4 weeks.
+
+This is deliberately replaceable and auditable, not a hidden behavioral score.
+Every point expands into its week, source, event, reason, mailbox, and sender
+evidence. Missing activity in any one optional channel has no penalty.
 
 ### Organizer workflow
 
@@ -220,8 +240,9 @@ not a point score and not the planned Resend organizer digest.
    or generic topic served a different purpose or had a different captain host.
 7. Click **Rematch now** once after a batch of decisions (or after roster changes).
    Rematch reapplies everything to stored attendance with no Zoom API call.
-8. Open a captain profile and expand **Why these signals appear** to audit the
-   value, derivation reason, and source.
+8. Sync Gmail repeatedly until each mailbox reports its 12-week backfill complete.
+9. Open a captain profile and expand **Why these points?** or
+   **Why these signals appear** to audit every value, reason, and source.
 
 ---
 
@@ -236,9 +257,10 @@ Zoom's API only goes back 6 months. For older data, export participant reports m
 Next.js 14 (Pages Router) · Vercel · Zoom Server-to-Server OAuth · Airtable
 (read-only roster) · Google Sheets (normalized datastore)
 
-Captain profiles expose transparent source-specific signals rather than a single
-opaque engagement score. The legacy Zoom explorer still shows raw attendance
-frequency labels for exploratory use; those are not official captain ratings.
+Captain profiles retain transparent source-specific signals and add a versioned,
+explainable active-week indicator. The legacy Zoom explorer still shows raw
+attendance frequency labels for exploratory use; those are not official captain
+ratings.
 
 ---
 

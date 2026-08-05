@@ -14,6 +14,7 @@ import {
   ensureWorkbookSheets,
   readSheetRows,
 } from '../../lib/google-sheets';
+import { buildEngagementScore } from '../../lib/engagement-score';
 
 function rowsToObjects(headers, rows) {
   return rows.map((row) => Object.fromEntries(
@@ -35,6 +36,7 @@ function newZoomSummary() {
       community: new Set(),
     },
     activityDates: new Map(),
+    engagementEvents: new Map(),
     hostedSessionIds: new Set(),
     communityHostedIds: new Set(),
     lastHosted: '',
@@ -60,6 +62,16 @@ function captainMatchesZone(captain, expectedZone) {
 function isEligibleCaptainSession(session) {
   return session.classification === 'captain'
     && Boolean(normalizeZoneToken(session.expected_zone));
+}
+
+function isEngagementClassification(classification) {
+  return [
+    'captain',
+    'working_group',
+    'captain_support',
+    'onboarding',
+    'community',
+  ].includes(classification);
 }
 
 function dashboardRecency(lastSeenAt, now = Date.now()) {
@@ -141,6 +153,9 @@ export default async function handler(req, res) {
         inbound: 0,
         outbound: 0,
         lastAt: '',
+        lastInboundAt: '',
+        lastInboundMailbox: '',
+        lastInboundSender: '',
       };
       current.total += 1;
       if (event.direction === 'inbound') current.inbound += 1;
@@ -150,6 +165,28 @@ export default async function handler(req, res) {
         && (!current.lastAt || event.occurred_at > current.lastAt)
       ) {
         current.lastAt = event.occurred_at;
+      }
+      if (event.direction === 'inbound') {
+        if (
+          event.occurred_at
+          && (
+            !current.lastInboundAt
+            || event.occurred_at > current.lastInboundAt
+          )
+        ) {
+          current.lastInboundAt = event.occurred_at;
+          current.lastInboundMailbox = event.mailbox;
+          current.lastInboundSender = event.from_email;
+        }
+        current.events = current.events || [];
+        current.events.push({
+          occurredAt: event.occurred_at,
+          source: 'gmail',
+          kind: 'inbound_email',
+          label: `Email received by ${event.mailbox}`,
+          reason: 'A known captain email address sent a message to an Altagether inbox.',
+          detail: `From ${event.from_email} to ${event.mailbox}`,
+        });
       }
       emailByCaptain.set(event.captain_record_id, current);
     });
@@ -177,6 +214,16 @@ export default async function handler(req, res) {
         if (classification !== 'test_exclude') {
           current.activityDates.set(attendance.session_id, session.date);
         }
+        if (isEngagementClassification(classification)) {
+          current.engagementEvents.set(`attendance:${attendance.session_id}`, {
+            occurredAt: `${session.date}T00:00:00.000Z`,
+            source: 'zoom',
+            kind: 'meeting_attendance',
+            label: session.topic || 'Zoom meeting attended',
+            reason: `Matched attendance in a ${classification.replaceAll('_', ' ')} session.`,
+            detail: `${Math.round((Number(attendance.duration_seconds) || 0) / 60)} minutes`,
+          });
+        }
       }
       zoomByCaptain.set(attendance.captain_record_id, current);
     });
@@ -191,6 +238,17 @@ export default async function handler(req, res) {
       if (session.classification !== 'test_exclude' && session.date) {
         current.activityDates.set(`host:${session.session_id}`, session.date);
       }
+      if (isEngagementClassification(session.classification) && session.date) {
+        current.engagementEvents.set(`host:${session.session_id}`, {
+          occurredAt: `${session.date}T00:00:00.000Z`,
+          source: 'zoom',
+          kind: 'meeting_hosting',
+          label: session.topic || 'Zoom meeting hosted',
+          reason: 'Credited as the captain host; this week receives the leadership point.',
+          detail: `${String(session.classification || 'unclassified').replaceAll('_', ' ')} session`,
+          leadership: true,
+        });
+      }
       if (session.date && (!current.lastHosted || session.date > current.lastHosted)) {
         current.lastHosted = session.date;
       }
@@ -201,6 +259,35 @@ export default async function handler(req, res) {
       const zoom = zoomByCaptain.get(captain.airtable_record_id) || newZoomSummary();
       const dashboard = dashboardByCaptain.get(captain.airtable_record_id) || null;
       const email = emailByCaptain.get(captain.airtable_record_id) || null;
+      const engagementEvents = [
+        ...zoom.engagementEvents.values(),
+        ...(email?.events || []),
+      ];
+      if (dashboard?.last_seen_at) {
+        engagementEvents.push({
+          occurredAt: dashboard.last_seen_at,
+          source: 'dashboard',
+          kind: 'dashboard_use',
+          label: 'Zone Dashboard use',
+          reason: 'The captain was observed using the Zone Dashboard.',
+          detail: `Login: ${dashboard.login_email}`,
+        });
+      }
+      if (captain.last_organizer_recorded_interaction) {
+        engagementEvents.push({
+          occurredAt: captain.last_organizer_recorded_interaction,
+          source: 'airtable',
+          kind: 'organizer_interaction',
+          label: 'Organizer-recorded interaction',
+          reason: 'An organizer recorded an interaction in the Airtable People roster.',
+          detail: captain.last_updated_by
+            ? `Recorded by ${captain.last_updated_by}`
+            : '',
+        });
+      }
+      const engagement = buildEngagementScore(engagementEvents, {
+        now: new Date(),
+      });
       const eligibleCaptainSessions = zoomSessions.filter((session) =>
         isEligibleCaptainSession(session)
         && captainMatchesZone(captain, session.expected_zone)
@@ -372,8 +459,12 @@ export default async function handler(req, res) {
             inbound: email.inbound,
             outbound: email.outbound,
             lastAt: email.lastAt || '',
+            lastInboundAt: email.lastInboundAt || '',
+            lastInboundMailbox: email.lastInboundMailbox || '',
+            lastInboundSender: email.lastInboundSender || '',
           }
           : null,
+        engagement,
         signals,
       };
     });
@@ -419,6 +510,22 @@ export default async function handler(req, res) {
         emailEvents: emailEvents.length,
         emailMatched: emailEvents.filter((event) =>
           event.match_status === 'matched'
+        ).length,
+        engagementPoints: captains.reduce(
+          (sum, captain) => sum + captain.engagement.points,
+          0
+        ),
+        atRisk: captains.filter(
+          (captain) => captain.engagement.risk === 'at_risk'
+        ).length,
+        needsAttention: captains.filter(
+          (captain) => captain.engagement.risk === 'needs_attention'
+        ).length,
+        recentlyActive: captains.filter(
+          (captain) => captain.engagement.risk === 'recently_active'
+        ).length,
+        trendingDown: captains.filter(
+          (captain) => captain.engagement.trend.direction === 'decreasing'
         ).length,
       },
     });
